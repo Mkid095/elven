@@ -1,0 +1,551 @@
+package com.tickedge.ui.screens
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.tickedge.data.model.MarketState
+import com.tickedge.data.model.OverUnderStats
+import com.tickedge.data.model.SupportedMarkets
+import com.tickedge.domain.DigitAnalysisEngine
+import com.tickedge.ui.components.ConnectionBadge
+import com.tickedge.ui.components.DigitFrequencyRow
+import com.tickedge.ui.theme.BorderDark
+import com.tickedge.ui.theme.StatGreen
+import com.tickedge.ui.theme.StatRed
+import com.tickedge.ui.theme.SurfaceDarkCard
+import com.tickedge.ui.theme.TextPrimary
+import com.tickedge.ui.theme.TextSecondary
+import com.tickedge.ui.theme.VividYellow
+import java.util.Locale
+
+@Composable
+fun AnalysisScreen(
+    marketsState: Map<String, MarketState>,
+    selectedSymbol: String,
+    inspectedDigit: Int?,
+    onMarketSelected: (String) -> Unit,
+    onDigitSelected: (Int) -> Unit,
+    onWindowSizeChanged: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val currentMarket = marketsState[selectedSymbol] ?: MarketState(
+        symbol = selectedSymbol,
+        displayName = "Market",
+        shortName = "Market"
+    )
+
+    // Subtabs: "Volatility Analysis" (Digit Tick Distribution) vs "Over & Under Analysis"
+    var currentTab by remember { mutableStateOf("Volatility Analysis") }
+
+    // Toggle inside Over & Under Analysis: "All", "Over (>)", "Under (<)"
+    var overUnderFilter by remember { mutableStateOf("All") }
+
+    val maxPercentage = currentMarket.digitFrequencies.maxOfOrNull { it.percentage } ?: 10.0
+    val overUnderStatsList = remember(currentMarket.ticks) {
+        DigitAnalysisEngine.computeOverUnderStats(currentMarket.ticks)
+    }
+
+    LazyColumn(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF0D0E12))
+            .padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 12.dp, bottom = 90.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Screen Header
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Market Analysis",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Authoritative last-digit probability engine",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+                }
+                ConnectionBadge(status = currentMarket.connectionStatus)
+            }
+        }
+
+        // Subtabs: Volatility Analysis vs Over & Under Analysis
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(SurfaceDarkCard, RoundedCornerShape(12.dp))
+                    .padding(4.dp)
+            ) {
+                listOf("Volatility Analysis", "Over & Under Analysis").forEach { tab ->
+                    val isSelected = currentTab == tab
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isSelected) VividYellow else Color.Transparent)
+                            .clickable { currentTab = tab }
+                            .padding(vertical = 9.dp)
+                            .testTag("tab_${tab.replace(" ", "_").lowercase()}"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = tab,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSelected) Color(0xFF101216) else TextSecondary
+                        )
+                    }
+                }
+            }
+        }
+
+        // Market Chips (10, 25, 50, 75, 100)
+        item {
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(SupportedMarkets.ALL) { def ->
+                    val isSelected = def.symbol == selectedSymbol
+                    Surface(
+                        onClick = { onMarketSelected(def.symbol) },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isSelected) VividYellow else SurfaceDarkCard,
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isSelected) VividYellow else BorderDark
+                        ),
+                        modifier = Modifier.testTag("market_chip_${def.symbol}")
+                    ) {
+                        Text(
+                            text = def.shortName.replace("Vol ", "Volatility "),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isSelected) Color(0xFF101216) else TextPrimary,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Live Market Status & Latest Tick Quote Card
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = currentMarket.displayName,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Analyzing ${currentMarket.sampleSize} valid ticks (Window: ${currentMarket.configuredWindowSize})",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            val fullQuote = currentMarket.lastFormattedQuote
+                            if (fullQuote.length > 1) {
+                                Text(
+                                    text = fullQuote.dropLast(1),
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = fullQuote.takeLast(1),
+                                    fontSize = 26.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = VividYellow
+                                )
+                            } else {
+                                Text(
+                                    text = fullQuote,
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                            }
+                        }
+                    }
+
+                    // Last Digit Box
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(text = "Last Digit", fontSize = 10.sp, color = TextSecondary)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(VividYellow, RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = currentMarket.lastDigit?.toString() ?: "-",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color(0xFF101216)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Set Ticks to Analyze (1 to 1000)
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Ticks to Analyze",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = TextSecondary
+                        )
+                        Text(
+                            text = "${currentMarket.configuredWindowSize} ticks (Max 1000)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = VividYellow
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = { onWindowSizeChanged((currentMarket.configuredWindowSize - 10).coerceAtLeast(10)) },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(Color(0xFF232734), RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.Default.Remove, contentDescription = "Decrease", tint = TextPrimary)
+                        }
+
+                        // Presets
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(30, 50, 100, 500, 1000).forEach { preset ->
+                                val isSelected = currentMarket.configuredWindowSize == preset
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(if (isSelected) VividYellow else Color(0xFF232734))
+                                        .clickable { onWindowSizeChanged(preset) }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$preset",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) Color(0xFF101216) else TextSecondary
+                                    )
+                                }
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { onWindowSizeChanged((currentMarket.configuredWindowSize + 10).coerceAtMost(1000)) },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(Color(0xFF232734), RoundedCornerShape(8.dp))
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Increase", tint = TextPrimary)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= TAB 1: VOLATILITY ANALYSIS (DIGIT TICK FREQUENCIES) =================
+        if (currentTab == "Volatility Analysis") {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "Digit", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
+                    Text(text = "Distribution Bar", fontSize = 12.sp, color = TextSecondary)
+                    Text(text = "Count", fontSize = 12.sp, color = TextSecondary)
+                    Text(text = "Prob %", fontSize = 12.sp, color = TextSecondary)
+                    Text(text = "Trend", fontSize = 12.sp, color = TextSecondary)
+                }
+            }
+
+            // 10 Digits (0 to 9)
+            items(currentMarket.digitFrequencies) { freq ->
+                DigitFrequencyRow(
+                    frequency = freq,
+                    isSelected = false,
+                    maxPercentage = maxPercentage,
+                    onClick = { /* informative view */ }
+                )
+            }
+
+            // Summary of Most & Least Appeared Digits
+            item {
+                val mostFrequent = currentMarket.digitFrequencies.maxByOrNull { it.count }
+                val leastFrequent = currentMarket.digitFrequencies.minByOrNull { it.count }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(text = "Highest Frequency", fontSize = 11.sp, color = TextSecondary)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Digit ${mostFrequent?.digit ?: "-"} (${String.format(Locale.US, "%.1f%%", mostFrequent?.percentage ?: 0.0)})",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = StatGreen
+                            )
+                        }
+                    }
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(text = "Lowest Frequency", fontSize = 11.sp, color = TextSecondary)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Digit ${leastFrequent?.digit ?: "-"} (${String.format(Locale.US, "%.1f%%", leastFrequent?.percentage ?: 0.0)})",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = StatRed
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= TAB 2: OVER & UNDER ANALYSIS =================
+        if (currentTab == "Over & Under Analysis") {
+            item {
+                // Filter Switcher: All, Over, Under
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SurfaceDarkCard, RoundedCornerShape(10.dp))
+                        .padding(3.dp)
+                ) {
+                    listOf("All" to "All View", "Over" to "Over ( > )", "Under" to "Under ( < )").forEach { (key, label) ->
+                        val isSelected = overUnderFilter == key
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) VividYellow else Color.Transparent)
+                                .clickable { overUnderFilter = key }
+                                .padding(vertical = 7.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSelected) Color(0xFF101216) else TextSecondary
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Ref Digit", fontSize = 12.sp, color = TextSecondary)
+                    if (overUnderFilter == "All" || overUnderFilter == "Over") {
+                        Text(text = "Over (> d)", fontSize = 12.sp, color = StatGreen)
+                    }
+                    if (overUnderFilter == "All" || overUnderFilter == "Under") {
+                        Text(text = "Under (< d)", fontSize = 12.sp, color = StatRed)
+                    }
+                    Text(text = "Match (= d)", fontSize = 12.sp, color = VividYellow)
+                }
+            }
+
+            // Rows for each reference digit 0 through 9
+            items(overUnderStatsList) { stat ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Digit Badge
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .background(Color(0xFF232734), RoundedCornerShape(6.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "${stat.digit}",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = VividYellow
+                            )
+                        }
+
+                        // Over Column
+                        if (overUnderFilter == "All" || overUnderFilter == "Over") {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = String.format(Locale.US, "%.1f%%", stat.overPercentage),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatGreen
+                                )
+                                Text(
+                                    text = "${stat.overCount} ticks",
+                                    fontSize = 10.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        // Under Column
+                        if (overUnderFilter == "All" || overUnderFilter == "Under") {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = String.format(Locale.US, "%.1f%%", stat.underPercentage),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = StatRed
+                                )
+                                Text(
+                                    text = "${stat.underCount} ticks",
+                                    fontSize = 10.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        // Match Column
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = String.format(Locale.US, "%.1f%%", stat.matchPercentage),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "${stat.matchCount} ticks",
+                                fontSize = 10.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

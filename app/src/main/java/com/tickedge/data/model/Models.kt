@@ -1,0 +1,178 @@
+package com.tickedge.data.model
+
+import java.util.Locale
+
+enum class AccountType(val displayName: String) {
+    DEMO("Demo Account"),
+    LIVE("Live Account")
+}
+
+enum class ConnectionStatus(val label: String) {
+    CONNECTING("Connecting"),
+    LOADING_HISTORY("Loading History"),
+    LIVE("Live"),
+    RECONNECTING("Reconnecting"),
+    STALE("Stale"),
+    OFFLINE("Offline"),
+    ERROR("Error")
+}
+
+enum class TrendDirection {
+    UP, DOWN, EQUAL
+}
+
+enum class ComparisonOperator(val symbol: String, val label: String) {
+    GREATER_THAN(">", "Above (strictly >)"),
+    GREATER_OR_EQUAL(">=", "Above or equal (>=)"),
+    LESS_THAN("<", "Below (strictly <)"),
+    LESS_OR_EQUAL("<=", "Below or equal (<=)")
+}
+
+enum class TradeType(val displayName: String) {
+    DIFFERS("Differs (Main)"),
+    OVER_UNDER("Over & Under (Recovery)")
+}
+
+enum class TradeDurationUnit(val label: String, val shortLabel: String) {
+    TICKS("Ticks", "t"),
+    SECONDS("Seconds", "s"),
+    MINUTES("Minutes", "m")
+}
+
+enum class TradeOutcome {
+    PENDING, WON, LOST
+}
+
+data class MarketDef(
+    val symbol: String,
+    val displayName: String,
+    val shortName: String,
+    val pipSize: Int,
+    val basePrice: Double
+)
+
+object SupportedMarkets {
+    val ALL = listOf(
+        MarketDef("R_10", "Volatility 10 Index", "Vol 10", 3, 6245.120),
+        MarketDef("R_25", "Volatility 25 Index", "Vol 25", 3, 2489.340),
+        MarketDef("R_50", "Volatility 50 Index", "Vol 50", 4, 189.5420),
+        MarketDef("R_75", "Volatility 75 Index", "Vol 75", 4, 76234.8100),
+        MarketDef("R_100", "Volatility 100 Index", "Vol 100", 2, 4521.90)
+    )
+
+    fun find(symbol: String): MarketDef =
+        ALL.firstOrNull { it.symbol.equals(symbol, ignoreCase = true) } ?: ALL[0]
+}
+
+data class TickObservation(
+    val epoch: Long,
+    val quote: Double,
+    val pipSize: Int,
+    val formattedQuote: String,
+    val lastDigit: Int,
+    val priceDiff: Double = 0.0
+)
+
+data class DigitFrequency(
+    val digit: Int,
+    val count: Int,
+    val percentage: Double,
+    val trend: TrendDirection
+)
+
+data class OverUnderStats(
+    val digit: Int,
+    val overCount: Int,
+    val overPercentage: Double,
+    val underCount: Int,
+    val underPercentage: Double,
+    val matchCount: Int,
+    val matchPercentage: Double
+)
+
+data class MarketState(
+    val symbol: String,
+    val displayName: String,
+    val shortName: String,
+    val connectionStatus: ConnectionStatus = ConnectionStatus.CONNECTING,
+    val lastQuote: Double? = null,
+    val lastFormattedQuote: String = "--",
+    val lastEpoch: Long? = null,
+    val lastDigit: Int? = null,
+    val lastPriceDiff: Double = 0.0,
+    val pipSize: Int = 3,
+    val ticks: List<TickObservation> = emptyList(),
+    val digitFrequencies: List<DigitFrequency> = (0..9).map { DigitFrequency(it, 0, 0.0, TrendDirection.EQUAL) },
+    val sampleSize: Int = 0,
+    val configuredWindowSize: Int = 30,
+    val lastUpdateTimestamp: Long = 0L,
+    val lastError: String? = null
+)
+
+data class TradeSettings(
+    val targetDigit: Int = 2,
+    val recoveryDigit: Int = 4,
+    val recoveryDirection: String = "OVER", // "OVER" or "UNDER"
+    val comparisonOperator: ComparisonOperator = ComparisonOperator.GREATER_THAN,
+    val thresholdPercent: Double = 70.0,
+    val stakeAmount: Double = 1.00,
+    val takeProfit: Double = 0.50,
+    val stopLoss: Double = 5.00,
+    val durationUnit: TradeDurationUnit = TradeDurationUnit.TICKS,
+    val durationValue: Int = 5,
+    val martingaleEnabled: Boolean = true
+)
+
+data class MartingaleRiskStep(
+    val step: Int,
+    val contractType: String,
+    val stake: Double,
+    val cumulativeRisk: Double,
+    val potentialGrossReturn: Double,
+    val netProfitOnWin: Double,
+    val winProbabilityEstimate: Double
+)
+
+data class SystemConfig(
+    val randomMarkets: Boolean = true,
+    val maxTradesPerMarket: Int = 3,
+    val maxDailyLoss: Double = 20.0,
+    val stopTradingOnLimit: Boolean = true
+)
+
+data class AnalysisEvent(
+    val id: Long = 0,
+    val userId: String = "user_default",
+    val marketSymbol: String,
+    val targetDigit: Int,
+    val windowSize: Int,
+    val sampleSize: Int,
+    val occurrenceCount: Int,
+    val observedPercent: Double,
+    val comparisonOperator: ComparisonOperator,
+    val thresholdPercent: Double,
+    val conditionMet: Boolean,
+    val eventTimestamp: Long
+)
+
+data class SimulatedTrade(
+    val id: String,
+    val marketSymbol: String,
+    val marketName: String,
+    val tradeType: TradeType,
+    val targetDigit: Int,
+    val stake: Double,
+    val payout: Double,
+    val netResult: Double,
+    val outcome: TradeOutcome,
+    val entryQuote: Double,
+    val exitQuote: Double,
+    val exitDigit: Int,
+    val timestamp: Long,
+    val durationText: String = "5 ticks",
+    val accountId: String = "",
+    val contractId: String = "",
+    val currency: String = "USD",
+    val isReal: Boolean = false,
+    val note: String = ""
+)

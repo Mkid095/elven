@@ -1,0 +1,8 @@
+{
+  "name": "TickEdge",
+  "description": "Real-time synthetic-index tick digit statistics and paper-trading simulator for Deriv markets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "user_settings": {
+    "attrs": {
+      "userId": "string",
+      "accountId": "string",
+      "activeAccountKind": "string",
+      "realArmed": "boolean",
+      "requirePerOrderConfirm": "boolean",
+      "maxMartingaleSteps": "number",
+      "baseStake": "number",
+      "takeProfit": "number",
+      "stopLoss": "number",
+      "maxDailyLoss": "number",
+      "market": "string",
+      "contractType": "string",
+      "targetDigit": "number",
+      "recoveryDigit": "number",
+      "recoveryDirection": "string",
+      "updatedAt": "number"
+    }
+  },
+  "trade_history": {
+    "attrs": {
+      "userId": "string",
+      "accountId": "string",
+      "contractId": "string",
+      "market": "string",
+      "digit": "number",
+      "stake": "number",
+      "net": "number",
+      "currency": "string",
+      "isReal": "boolean",
+      "outcome": "string",
+      "note": "string",
+      "createdAt": "number"
+    }
+  }
+}

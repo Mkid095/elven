@@ -1,0 +1,1 @@
+{"appId":"ce219821-50b6-4ffd-9e9f-d6ec44e6b7e9","perms":{"user_settings":{"view":"auth.id == data.userId","create":"auth.id == data.userId","update":"auth.id == data.userId","delete":"auth.id == data.userId"},"trade_history":{"view":"auth.id == data.userId","create":"auth.id == data.userId","update":"auth.id == data.userId","delete":"auth.id == data.userId"}}}

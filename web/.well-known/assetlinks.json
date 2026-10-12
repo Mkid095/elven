@@ -1,0 +1,22 @@
+[
+  {
+    "@types": [ "https://schema.org/AndroidApplication" ],
+    "name": "TickEdge",
+    "url": "https://elven.nextmavens.com",
+    "userInteractionPolicy": "always",
+    "relation": [ "delegate_permission/common_handle_all_http_uris" ],
+    "platforms": {
+      "android": {
+        "namespace": "com.aistudio.tickedge.mpyvwz",
+        "certificates": [
+          { "sha256": "9c2187748b6864d0cae15d414f25720e4b36e4142437b80d227df65b78f72640" }
+        ]
+      }
+    },
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.aistudio.tickedge.mpyvwz",
+      "sha256_certificates": [ "9c2187748b6864d0cae15d414f25720e4b36e4142437b80d227df65b78f72640" ]
+    }
+  }
+]

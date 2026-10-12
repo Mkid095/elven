@@ -1,0 +1,21 @@
+{
+  "mcp": {
+    "servers": {
+      "instant-self": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@fidscript/instant-mcp@0.6.1"
+        ],
+        "env": {
+          "INSTANT_ACCESS_TOKEN": "per_cfe922e5dab4b8b6b1acbbba5f61724f5ac2b46d29a87a9be90d6f17728b2796",
+          "INSTANT_API_HOST": "https://apiinstant.fidscript.com",
+          "INSTANT_DASH_HOST": "https://instant.fidscript.com",
+          "INSTANT_MAVEN_HOST": "https://instant.fidscript.com/maven",
+          "INSTANT_APP_ID": "ce219821-50b6-4ffd-9e9f-d6ec44e6b7e9"
+        }
+      }
+    }
+  }
+}
