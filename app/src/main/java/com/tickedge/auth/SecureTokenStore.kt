@@ -23,7 +23,17 @@ class SecureTokenStore(
     context: Context,
     private val prefsName: String = "deriv_oauth_secure"
 ) {
-    private val keyAlias = "deriv_oauth_enc_key"
+    /**
+     * Key alias for every [SecureTokenStore] instance, including the FIDScript one — they
+     * deliberately share one Android Keystore entry.
+     *
+     * Versioned to `_v2`: keys created before this revision were generated without an explicit
+     * encryption padding and are permanently unusable (INCOMPATIBLE_PADDING_MODE). Moving the
+     * alias guarantees a correct key is generated rather than trusting the delete-and-retry
+     * recovery path to evict the bad entry. Existing blobs simply stop decrypting and are
+     * treated as "signed out", which is the correct outcome — they could not be read anyway.
+     */
+    private val keyAlias = "deriv_oauth_enc_key_v2"
     private val prefs = context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
     private companion object {
@@ -52,6 +62,13 @@ class SecureTokenStore(
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                // REQUIRED alongside GCM. Without this the key is created without an explicit
+                // padding mode, and cipher.init() for AES/GCM/NoPadding then fails with
+                //   KeyStoreException: Incompatible padding mode (KM error -11)
+                // at upgrade_keyblob_if_required_with. GCM is a stream mode and has no padding;
+                // it must still be declared, or the generated key does not match the cipher.
+                // Observed on a Samsung device (API 36).
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .build()
         )
         return generator.generateKey()
