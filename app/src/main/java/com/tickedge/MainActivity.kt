@@ -107,6 +107,9 @@ fun TickEdgeApp(
     val activeAccount by viewModel.activeAccount.collectAsStateWithLifecycle()
     val realArmed by viewModel.realArmed.collectAsStateWithLifecycle()
     val pendingConfirmation by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
+    val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
+    val sessionSummary by viewModel.sessionSummary.collectAsStateWithLifecycle()
+    val lastConfirmedTrade by viewModel.lastConfirmedTrade.collectAsStateWithLifecycle()
 
     // Gate the authenticated experience on the real auth state
     if (authState !is com.tickedge.auth.AuthState.Authenticated) {
@@ -252,7 +255,10 @@ fun TickEdgeApp(
                     }
                 )
                 "history" -> HistoryScreen(
-                    positions = pastPositions
+                    positions = pastPositions,
+                    activeSession = activeSession,
+                    sessionSummary = sessionSummary,
+                    lastConfirmedTrade = lastConfirmedTrade
                 )
                 "settings" -> SettingsScreen(
                     userProfile = userProfile,

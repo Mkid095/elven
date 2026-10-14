@@ -62,7 +62,16 @@ class TradingEngine(
      * sign-in as someone else. Resolving it per write keeps trades with whoever is actually
      * signed in.
      */
-    private val userIdProvider: () -> String
+    private val userIdProvider: () -> String,
+    /**
+     * Supplies the session id stamped onto every position.
+     *
+     * A provider for the same reason as [userIdProvider], plus one more: the session does not
+     * exist when the engine is constructed — it is created when Start is pressed. Positions were
+     * previously written with a hardcoded `sessionId = 1L`, so every position ever recorded shared
+     * one bucket and could not be attributed to a run.
+     */
+    private val sessionIdProvider: () -> Long
 ) {
     private val _simState = MutableStateFlow(SimulatorState.IDLE)
     val simState: StateFlow<SimulatorState> = _simState.asStateFlow()
@@ -517,7 +526,7 @@ class TradingEngine(
             database.simulationDao().insertPosition(
                 SimulationPositionEntity(
                     userId = userIdProvider(),
-                    sessionId = 1L,
+                    sessionId = sessionIdProvider(),
                     marketSymbol = symbol,
                     marketName = SupportedMarkets.find(symbol).shortName,
                     scenarioType = tradeType.displayName,

@@ -34,7 +34,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tickedge.data.local.LastTradeRow
+import com.tickedge.data.local.SessionSummary
 import com.tickedge.data.local.SimulationPositionEntity
+import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.ui.components.SimpleLineChart
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.StatGreen
@@ -50,6 +53,9 @@ import java.util.Locale
 @Composable
 fun HistoryScreen(
     positions: List<SimulationPositionEntity>,
+    activeSession: SimulationSessionEntity?,
+    sessionSummary: SessionSummary?,
+    lastConfirmedTrade: LastTradeRow?,
     modifier: Modifier = Modifier
 ) {
     var selectedTab by remember { mutableStateOf("Trades") } // "Trades", "P&L", "Sessions"
@@ -66,6 +72,15 @@ fun HistoryScreen(
         contentPadding = PaddingValues(top = 12.dp, bottom = 90.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Session results — confirmed P&L for the current run, above the per-trade list.
+        item {
+            SessionResultsCard(
+                session = activeSession,
+                summary = sessionSummary,
+                lastTrade = lastConfirmedTrade
+            )
+        }
+
         // Screen Title
         item {
             Text(

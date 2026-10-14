@@ -137,6 +137,16 @@ data class SimulationSessionEntity(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
     val userId: String,
+    /**
+     * Deriv account this session ran on. Sessions are scoped per account as well as per user, so
+     * switching demo/real mid-run can never blend two accounts' results into one total.
+     */
+    val accountId: String = "",
+    val isReal: Boolean = false,
+    /** Strategy label recorded at start, e.g. "Differs" — shown on the session results. */
+    val strategy: String = "Differs",
+    /** Position of the selected digit at session start, for reference in the results. */
+    val targetDigit: Int = 2,
     val initialSimulatedBalance: Double = 0.0,
     val currentSimulatedBalance: Double = 0.0,
     val status: String = "ACTIVE",
@@ -145,6 +155,29 @@ data class SimulationSessionEntity(
     val totalTrades: Int = 0,
     val winCount: Int = 0,
     val lossCount: Int = 0
+)
+
+/**
+ * Aggregated results for one session, computed from confirmed positions.
+ *
+ * Deliberately derived by SQL from `simulation_positions` rather than denormalised onto the session
+ * row: a cached total can drift from the trades that justify it, and these numbers decide whether
+ * the user stops or escalates.
+ *
+ * [lastTradeNet] is the most recently *settled* trade's net result, and [lastTradeSettledAt] its
+ * settlement time, so the UI can show both the amount and how stale it is.
+ */
+data class SessionSummary(
+    val sessionId: Long = 0,
+    val completedTrades: Int = 0,
+    val winCount: Int = 0,
+    val lossCount: Int = 0,
+    val totalRealizedPnl: Double = 0.0,
+    val totalStaked: Double = 0.0,
+    val lastTradeNet: Double? = null,
+    val lastTradeSettledAt: Long? = null,
+    val lastTradeMarket: String? = null,
+    val lastTradeOutcome: String? = null
 )
 
 /**
@@ -167,7 +200,9 @@ data class SimulationSessionEntity(
     indices = [
         Index("userId"),
         Index("accountId"),
-        Index("userId", "accountId")
+        Index("sessionId"),
+        Index("userId", "accountId"),
+        Index("userId", "sessionId")
     ]
 )
 data class SimulationPositionEntity(

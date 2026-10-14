@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimulationSessionEntity::class,
         SimulationPositionEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -35,7 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "tickedge_database"
                 )
-                    .addMigrations(MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7)
+                    .addMigrations(MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7, MIGRATION_7_TO_8)
                     .build()
                 INSTANCE = instance
                 instance
@@ -294,6 +294,34 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE `user_settings` ADD COLUMN `digitSelectionMode` TEXT NOT NULL DEFAULT 'fixed'"
                 )
+            }
+        }
+        /**
+         * v7 -> v8: record which account and strategy a session ran on.
+         *
+         * Additive, so ALTER TABLE ADD COLUMN throughout (see MIGRATION_5_TO_6 for why recreating a
+         * table for an added column is a trap).
+         *
+         * Existing rows get empty defaults: they predate session tracking entirely, so there was no
+         * account or strategy to record for them and inventing one would misreport history.
+         */
+        private val MIGRATION_7_TO_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `accountId` TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `isReal` INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `strategy` TEXT NOT NULL DEFAULT 'Differs'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `targetDigit` INTEGER NOT NULL DEFAULT 2"
+                )
+                // The session-scoped queries all filter on sessionId, which had no index.
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_simulation_positions_sessionId` ON `simulation_positions` (`sessionId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_simulation_positions_userId_sessionId` ON `simulation_positions` (`userId`, `sessionId`)")
             }
         }
     }

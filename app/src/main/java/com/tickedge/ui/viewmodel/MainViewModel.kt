@@ -13,6 +13,9 @@ import com.tickedge.data.instant.FidscriptSession
 import com.tickedge.data.instant.InstantDbClient
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.AnalysisEventEntity
+import com.tickedge.data.local.LastTradeRow
+import com.tickedge.data.local.SessionSummary
+import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.local.UserProfileEntity
 import com.tickedge.data.local.UserSettingsEntity
 import com.tickedge.data.model.AccountType
@@ -35,6 +38,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -44,6 +48,9 @@ import kotlinx.coroutines.launch
  * attributes legacy rows to, so anonymous history stays visible after the upgrade.
  */
 private const val ANONYMOUS_USER_ID = "default_trader"
+
+/** Sentinel for "no session open". Never a real row id, which SQLite starts at 1. */
+private const val NO_SESSION = 0L
 
 /**
  * Smallest analysis window, per spec. Note a window below [MIN_ANALYSIS_SAMPLE] can never
@@ -79,7 +86,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         get() = oauth.currentUser()?.stableKey ?: ANONYMOUS_USER_ID
 
     // Resolve the user per write, not once at construction — see TradingEngine's userIdProvider.
-    private val tradingEngine = TradingEngine(deriv, db, viewModelScope) { currentUserId }
+    /**
+     * Id of the session positions are currently being written to.
+     *
+     * Held in a `var` rather than a StateFlow because [tradingEngine] only needs a synchronous
+     * read at write time; the user-facing copy is [activeSessionId].
+     */
+    @Volatile
+    private var currentSessionId: Long = NO_SESSION
+
+    private val tradingEngine = TradingEngine(deriv, db, viewModelScope, { currentUserId }, { currentSessionId })
 
     /**
      * FIDScript cross-device sync.
@@ -282,6 +298,90 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val uid = (state as? AuthState.Authenticated)?.user?.id ?: ANONYMOUS_USER_ID
             db.analysisEventDao().getEventsForUser(uid)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // ---------------------------------------------------------------- trading sessions
+
+    private val _activeSessionId = MutableStateFlow<Long?>(null)
+    val activeSessionId: StateFlow<Long?> = _activeSessionId.asStateFlow()
+
+    private val _activeSession = MutableStateFlow<SimulationSessionEntity?>(null)
+    val activeSession: StateFlow<SimulationSessionEntity?> = _activeSession.asStateFlow()
+
+    /**
+     * Live results for the running session, recomputed from confirmed trades.
+     *
+     * Derived from the positions table rather than accumulated in memory, so it cannot disagree
+     * with the trades that justify it and it survives a process death.
+     */
+    val sessionSummary: StateFlow<SessionSummary?> = _activeSessionId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(null)
+            else db.simulationDao().getSessionSummary(currentUserId, id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** The most recent confirmed trade in the running session, for the "last trade" readout. */
+    val lastConfirmedTrade: StateFlow<LastTradeRow?> = _activeSessionId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(null)
+            else db.simulationDao().getLastConfirmedTrade(currentUserId, id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** Positions belonging to the running session only, for session-scoped history. */
+    val sessionPositions: StateFlow<List<SimulationPositionEntity>> = _activeSessionId
+        .flatMapLatest { id ->
+            if (id == null) flowOf(emptyList())
+            else db.simulationDao().getPositionsForSession(currentUserId, id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Open a session for this run, or reuse the one already in progress.
+     *
+     * Reuse matters because Start can be pressed again after a stop that did not close cleanly;
+     * opening a second session would split one run's trades across two result sets.
+     */
+    private suspend fun ensureSessionStarted() {
+        val existing = db.simulationDao().getLatestSession(currentUserId).first()
+        if (existing != null && existing.status == "ACTIVE") {
+            currentSessionId = existing.id
+            _activeSessionId.value = existing.id
+            _activeSession.value = existing
+            return
+        }
+        val account = deriv.activeAccount
+        val opened = db.simulationDao().insertSession(
+            SimulationSessionEntity(
+                userId = currentUserId,
+                accountId = account?.id.orEmpty(),
+                isReal = account?.kind == DerivAccountKind.REAL,
+                strategy = "Differs",
+                targetDigit = _tradeSettings.value.targetDigit,
+                status = "ACTIVE"
+            )
+        )
+        currentSessionId = opened
+        _activeSessionId.value = opened
+    }
+
+    /** Close the running session and clear the current id so the next Start opens a fresh one. */
+    private suspend fun endSession() {
+        val id = currentSessionId
+        if (id == NO_SESSION) return
+        val summary = db.simulationDao().getSessionSummary(currentUserId, id).first()
+        db.simulationDao().closeSession(
+            sessionId = id,
+            status = "COMPLETED",
+            endedAt = System.currentTimeMillis(),
+            totalTrades = summary?.completedTrades ?: 0,
+            winCount = summary?.winCount ?: 0,
+            lossCount = summary?.lossCount ?: 0
+        )
+        currentSessionId = NO_SESSION
+        _activeSessionId.value = null
+        _activeSession.value = null
+    }
 
     // Navigation
     private val _currentScreen = MutableStateFlow("home")
@@ -515,22 +615,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateTo(screen: String) { _currentScreen.value = screen }
 
     fun startTrading() {
-        // The engine persists positions itself, so its foreign-key parent must exist first.
-        viewModelScope.launch { ensureProfile() }
-        tradingEngine.startTrading(
-            settings = _tradeSettings.value,
-            config = _systemConfig.value,
-            getMarketState = { symbol -> marketsState.value[symbol] },
-            safety = TradingEngine.TradingSafety(
-                activeKind = { _activeAccountType.value.toDerivKind() },
-                isRealArmed = { _realArmed.value },
-                requirePerOrderConfirm = { _requirePerOrderConfirm.value },
-                maxMartingaleSteps = { _maxMartingaleSteps.value }
+        // The engine persists positions itself, so both its foreign-key parent and the session
+        // must exist before the first trade. The engine start is therefore INSIDE the coroutine:
+        // launching the setup separately and starting the engine synchronously raced, so the first
+        // trade could be written before the session row existed and land under NO_SESSION, making it
+        // invisible to every session-scoped query.
+        viewModelScope.launch {
+            ensureProfile()
+            ensureSessionStarted()
+            tradingEngine.startTrading(
+                settings = _tradeSettings.value,
+                config = _systemConfig.value,
+                getMarketState = { symbol -> marketsState.value[symbol] },
+                safety = TradingEngine.TradingSafety(
+                    activeKind = { _activeAccountType.value.toDerivKind() },
+                    isRealArmed = { _realArmed.value },
+                    requirePerOrderConfirm = { _requirePerOrderConfirm.value },
+                    maxMartingaleSteps = { _maxMartingaleSteps.value }
+                )
             )
-        )
+        }
     }
 
-    fun stopTrading() { tradingEngine.stopTrading() }
+    fun stopTrading() {
+        tradingEngine.stopTrading()
+        viewModelScope.launch { endSession() }
+    }
     fun resolveConfirmation(approved: Boolean) { tradingEngine.resolvePendingConfirmation(approved) }
     fun dismissOutcomeBanner() { tradingEngine.dismissOutcomeBanner() }
 

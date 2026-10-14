@@ -96,6 +96,61 @@ interface SimulationDao {
     @Update
     suspend fun updateSession(session: SimulationSessionEntity)
 
+    /** Currently running session for a user, if any. */
+    @Query("SELECT * FROM simulation_sessions WHERE userId = :userId AND status = 'ACTIVE' ORDER BY startedAt DESC LIMIT 1")
+    fun getActiveSession(userId: String): Flow<SimulationSessionEntity?>
+
+    /** Every session for a user, newest first. */
+    @Query("SELECT * FROM simulation_sessions WHERE userId = :userId ORDER BY startedAt DESC")
+    fun getSessionsForUser(userId: String): Flow<List<SimulationSessionEntity>>
+
+    /** Close a session. */
+    @Query("UPDATE simulation_sessions SET status = :status, endedAt = :endedAt, totalTrades = :totalTrades, winCount = :winCount, lossCount = :lossCount WHERE id = :sessionId")
+    suspend fun closeSession(sessionId: Long, status: String, endedAt: Long, totalTrades: Int, winCount: Int, lossCount: Int)
+
+    /** Positions belonging to one session, newest first. */
+    @Query("SELECT * FROM simulation_positions WHERE userId = :userId AND sessionId = :sessionId ORDER BY settledAt DESC")
+    fun getPositionsForSession(userId: String, sessionId: Long): Flow<List<SimulationPositionEntity>>
+
+    /**
+     * Session totals, computed from confirmed outcomes only.
+     *
+     * `outcome IN ('WON','LOST')` excludes anything still PENDING, so an unsettled contract never
+     * inflates the trade count or contributes a 0.0 to the P&L. Totals are derived from the
+     * positions rather than cached on the session row, so they cannot drift from the trades that
+     * justify them.
+     */
+    @Query(
+        """
+        SELECT
+            :sessionId AS sessionId,
+            COUNT(*) AS completedTrades,
+            COALESCE(SUM(CASE WHEN outcome = 'WON' THEN 1 ELSE 0 END), 0) AS winCount,
+            COALESCE(SUM(CASE WHEN outcome = 'LOST' THEN 1 ELSE 0 END), 0) AS lossCount,
+            COALESCE(SUM(simulatedNetResult), 0.0) AS totalRealizedPnl,
+            COALESCE(SUM(simulatedStake), 0.0) AS totalStaked
+        FROM simulation_positions
+        WHERE userId = :userId AND sessionId = :sessionId AND outcome IN ('WON','LOST')
+        """
+    )
+    fun getSessionSummary(userId: String, sessionId: Long): Flow<SessionSummary>
+
+    /**
+     * The single most recent confirmed trade in a session.
+     *
+     * Uses `settledAt DESC` rather than row id because trades settle out of order relative to when
+     * they were placed.
+     */
+    @Query(
+        """
+        SELECT simulatedNetResult, settledAt, marketName, outcome
+        FROM simulation_positions
+        WHERE userId = :userId AND sessionId = :sessionId AND outcome IN ('WON','LOST')
+        ORDER BY settledAt DESC LIMIT 1
+        """
+    )
+    fun getLastConfirmedTrade(userId: String, sessionId: Long): Flow<LastTradeRow?>
+
     /** Delete all positions for a user. */
     @Query("DELETE FROM simulation_positions WHERE userId = :userId")
     suspend fun clearPositionsForUser(userId: String)
@@ -108,3 +163,11 @@ interface SimulationDao {
     @Query("DELETE FROM simulation_sessions WHERE userId = :userId")
     suspend fun clearSessionsForUser(userId: String)
 }
+
+/** Flat row backing [SimulationDao.getLastConfirmedTrade]. */
+data class LastTradeRow(
+    val simulatedNetResult: Double,
+    val settledAt: Long,
+    val marketName: String,
+    val outcome: String
+)
