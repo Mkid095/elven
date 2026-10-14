@@ -65,19 +65,19 @@ import com.tickedge.ui.theme.TextSecondary
 import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
-/** Smallest analysis window accepted, matching the Analysis screen's stepper floor. */
-private const val MIN_ANALYSIS_WINDOW = 10
+/** Smallest analysis window accepted. Below the minimum-sample size no entry can fire. */
+private const val MIN_ANALYSIS_WINDOW = 1
 
 /** Largest analysis window; matches the retained-history cap in the websocket service. */
 private const val MAX_ANALYSIS_WINDOW = 1000
 
 /**
- * Below this, a Differs-% threshold is satisfied on essentially every tick.
+ * Ticks required before a threshold is considered meaningful.
  *
- * P(last digit != d) is ~90% on live ticks by construction, so a threshold under the 90s does not
- * select moments — it just always passes. Used only to warn, never to clamp the user's value.
+ * A window shorter than this can never satisfy an entry, because the minimum-sample guard rejects
+ * the evaluation first. Kept in step with `MIN_ANALYSIS_SAMPLE` in MainViewModel.
  */
-private const val DIFFERS_FLOOR_THRESHOLD = 85.0
+private const val MIN_ANALYSIS_SAMPLE = 10
 
 @Composable
 fun TradeSettingsScreen(
@@ -281,12 +281,13 @@ fun TradeSettingsScreen(
                             targetDigit = targetDigit,
                             metric = analysisMetric,
                             onMetricChange = { analysisMetric = it },
+                            operator = operator,
+                            thresholdPercent = parsedThreshold,
                             windowText = analysisWindowText,
                             onWindowTextChange = { analysisWindowText = it },
-                            thresholdPercent = parsedThreshold,
                             minWindow = MIN_ANALYSIS_WINDOW,
                             maxWindow = MAX_ANALYSIS_WINDOW,
-                            differsFloorThreshold = DIFFERS_FLOOR_THRESHOLD
+                            minSampleSize = MIN_ANALYSIS_SAMPLE
                         )
 
                         // Explanatory Banner: WHY we have Target Digit and Threshold Above/Below

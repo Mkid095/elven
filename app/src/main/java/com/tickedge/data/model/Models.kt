@@ -133,7 +133,7 @@ data class MarketState(
     val ticks: List<TickObservation> = emptyList(),
     val digitFrequencies: List<DigitFrequency> = (0..9).map { DigitFrequency(it, 0, 0.0, TrendDirection.EQUAL) },
     val sampleSize: Int = 0,
-    val configuredWindowSize: Int = 30,
+    val configuredWindowSize: Int = 100,
     val lastUpdateTimestamp: Long = 0L,
     val lastError: String? = null
 )
@@ -146,8 +146,8 @@ data class TradeSettings(
     val thresholdPercent: Double = 70.0,
     /** Which probability [thresholdPercent] is compared against. See [AnalysisMetric]. */
     val analysisMetric: AnalysisMetric = AnalysisMetric.DIFFERS_PERCENT,
-    /** How many recent ticks the analysis is computed over (10..1000). */
-    val analysisWindowSize: Int = 30,
+    /** How many recent ticks the analysis is computed over (1..1000). */
+    val analysisWindowSize: Int = 100,
     val stakeAmount: Double = 1.00,
     val takeProfit: Double = 0.50,
     val stopLoss: Double = 5.00,

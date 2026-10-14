@@ -29,6 +29,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tickedge.data.model.AnalysisMetric
+import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.TextPrimary
 import com.tickedge.ui.theme.TextSecondary
@@ -36,31 +37,51 @@ import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
 /**
- * The three controls that decide *what* the entry threshold measures and *over how much data*:
- * the metric toggle, the sample window, and the warning that fires when the two are mismatched.
+ * Ordinary level of each metric on live Deriv synthetic ticks.
+ *
+ * Ten last digits on a roughly uniform stream give P(equals) ~10% and P(differs) ~90%. These are
+ * what a "filter" has to beat; a threshold at or below the baseline describes the market's normal
+ * behaviour rather than selecting a moment.
+ */
+private const val DIFFERS_BASELINE = 90.0
+private const val EQUALS_BASELINE = 10.0
+
+/**
+ * Controls deciding *what* the entry threshold measures and *over how much data*: the metric
+ * toggle, the sample window, and the warnings that fire when the combination is self-defeating.
  *
  * Extracted from [TradeSettingsScreen] to keep that file under the maintainability ceiling.
  *
- * The warning matters more than it looks. P(last digit != target) sits near 90% on live ticks by
- * construction, so a Differs-% threshold below the 90s is not a filter — it passes on virtually
- * every tick and the bot enters continuously. The user's number is never rewritten for them; the
- * screen just tells them which regime they are in.
+ * Neither warning blocks saving or rewrites the user's number. The threshold is theirs; the screen
+ * only states plainly which regime the combination puts them in.
  */
 @Composable
 fun AnalysisConditionFields(
     targetDigit: Int,
     metric: AnalysisMetric,
     onMetricChange: (AnalysisMetric) -> Unit,
+    operator: ComparisonOperator,
+    thresholdPercent: Double,
     windowText: String,
     onWindowTextChange: (String) -> Unit,
-    thresholdPercent: Double,
     minWindow: Int,
     maxWindow: Int,
-    differsFloorThreshold: Double,
+    minSampleSize: Int,
     modifier: Modifier = Modifier
 ) {
-    val thresholdIsTooLow =
-        metric == AnalysisMetric.DIFFERS_PERCENT && thresholdPercent < differsFloorThreshold
+    val baseline = if (metric == AnalysisMetric.DIFFERS_PERCENT) DIFFERS_BASELINE else EQUALS_BASELINE
+    val metricName = if (metric == AnalysisMetric.DIFFERS_PERCENT) "Differs %" else "Equals %"
+
+    // A condition at or below the baseline is satisfied by ordinary market behaviour, so it
+    // qualifies on nearly every tick rather than selecting anything.
+    val firesConstantly = when (operator) {
+        ComparisonOperator.GREATER_THAN -> thresholdPercent <= baseline
+        ComparisonOperator.GREATER_OR_EQUAL -> thresholdPercent < baseline
+        ComparisonOperator.LESS_THAN -> thresholdPercent >= baseline
+        ComparisonOperator.LESS_OR_EQUAL -> thresholdPercent > baseline
+    }
+
+    val windowTooSmall = (windowText.toIntOrNull() ?: minWindow) < minSampleSize
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -110,7 +131,7 @@ fun AnalysisConditionFields(
             },
             supportingText = {
                 Text(
-                    text = "Sample window every percentage here is computed over ($minWindow–$maxWindow).",
+                    text = "Sample window every percentage is computed over ($minWindow–$maxWindow).",
                     fontSize = 11.sp,
                     color = TextSecondary
                 )
@@ -130,43 +151,74 @@ fun AnalysisConditionFields(
             modifier = Modifier.fillMaxWidth().testTag("analysis_window_input")
         )
 
-        if (thresholdIsTooLow) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF241016), RoundedCornerShape(10.dp))
-                    .border(1.dp, Color(0xFF6B2F3A), RoundedCornerShape(10.dp))
-                    .padding(12.dp)
-                    .testTag("differs_threshold_warning")
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = "Threshold warning",
-                        tint = Color(0xFFF0879A),
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Column {
-                        Text(
-                            text = "This threshold will fire almost every tick",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF0879A)
-                        )
-                        Text(
-                            text = "Differs % normally sits near 90% on live ticks, so " +
-                                "${String.format(Locale.US, "%.1f", thresholdPercent)}% is met " +
-                                "constantly and the bot will enter continuously. Use a threshold " +
-                                "above ${String.format(Locale.US, "%.0f", differsFloorThreshold)}% " +
-                                "to trade only when digit $targetDigit is running cold.",
-                            fontSize = 11.sp,
-                            color = TextSecondary
-                        )
-                    }
-                }
+        if (windowTooSmall) {
+            WarningCard(
+                testTag = "window_too_small_warning",
+                title = "This window is too small to ever trigger an entry",
+                body = "An entry needs at least $minSampleSize valid ticks before the threshold is " +
+                    "evaluated at all. At ${windowText.ifBlank { "0" }} ticks the bot will analyse but " +
+                    "never trade.",
+                tint = VividYellow,
+                background = Color(0xFF241A10),
+                borderColor = Color(0xFF6B4A2F)
+            )
+        }
+
+        if (firesConstantly) {
+            WarningCard(
+                testTag = "threshold_fires_constantly_warning",
+                title = "This threshold will qualify almost every tick",
+                body = "$metricName normally sits near " +
+                    "${String.format(Locale.US, "%.0f", baseline)}% on live ticks, so " +
+                    "${String.format(Locale.US, "%.1f", thresholdPercent)}% " +
+                    "${operator.label.lowercase()} describes ordinary market behaviour rather than " +
+                    "a selectable moment. The bot will enter continuously.",
+                tint = Color(0xFFF0879A),
+                background = Color(0xFF241016),
+                borderColor = Color(0xFF6B2F3A)
+            )
+        }
+
+        Text(
+            text = "Percentages are measured over recent ticks only. They describe what has already " +
+                "happened in the window — they are not a prediction of the next tick, and a " +
+                "qualifying reading is not a guarantee that the contract will win.",
+            fontSize = 10.sp,
+            color = TextSecondary.copy(alpha = 0.75f)
+        )
+    }
+}
+
+@Composable
+private fun WarningCard(
+    testTag: String,
+    title: String,
+    body: String,
+    tint: Color,
+    background: Color,
+    borderColor: Color
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(background, RoundedCornerShape(10.dp))
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .padding(12.dp)
+            .testTag(testTag)
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = title,
+                tint = tint,
+                modifier = Modifier.size(18.dp)
+            )
+            Column {
+                Text(text = title, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = tint)
+                Text(text = body, fontSize = 11.sp, color = TextSecondary)
             }
         }
     }

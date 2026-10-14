@@ -94,7 +94,7 @@ abstract class AppDatabase : RoomDatabase() {
                     CREATE TABLE IF NOT EXISTS `user_settings` (
                         `id` INTEGER NOT NULL DEFAULT 1,
                         `userId` TEXT NOT NULL DEFAULT '$legacyUser',
-                        `windowSize` INTEGER NOT NULL DEFAULT 30,
+                        `windowSize` INTEGER NOT NULL DEFAULT 100,
                         `selectedDigit` INTEGER NOT NULL DEFAULT 2,
                         `recoveryDigit` INTEGER NOT NULL DEFAULT 4,
                         `recoveryDirection` TEXT NOT NULL DEFAULT 'OVER',
@@ -259,93 +259,27 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_5_TO_6 = object : Migration(5, 6) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // 1. user_settings: add analysisMetric
-                db.execSQL("ALTER TABLE `user_settings` RENAME TO `user_settings_v5`")
-                db.execSQL("""
-                    CREATE TABLE IF NOT EXISTS `user_settings` (
-                        `id` INTEGER NOT NULL DEFAULT 1,
-                        `userId` TEXT NOT NULL,
-                        `windowSize` INTEGER NOT NULL DEFAULT 30,
-                        `selectedDigit` INTEGER NOT NULL DEFAULT 2,
-                        `recoveryDigit` INTEGER NOT NULL DEFAULT 4,
-                        `recoveryDirection` TEXT NOT NULL DEFAULT 'OVER',
-                        `comparisonOperator` TEXT NOT NULL DEFAULT '>',
-                        `thresholdPercent` REAL NOT NULL DEFAULT 70.0,
-                        `analysisMetric` TEXT NOT NULL DEFAULT 'differs_pct',
-                        `minimumSampleSize` INTEGER NOT NULL DEFAULT 10,
-                        `stakeAmount` REAL NOT NULL DEFAULT 1.0,
-                        `takeProfit` REAL NOT NULL DEFAULT 0.5,
-                        `stopLoss` REAL NOT NULL DEFAULT 5.0,
-                        `durationUnit` TEXT NOT NULL DEFAULT 'Ticks',
-                        `durationValue` INTEGER NOT NULL DEFAULT 5,
-                        `martingaleEnabled` INTEGER NOT NULL DEFAULT 1,
-                        `tradeType` TEXT NOT NULL DEFAULT 'Differs',
-                        `randomMarkets` INTEGER NOT NULL DEFAULT 1,
-                        `maxTradesPerMarket` INTEGER NOT NULL DEFAULT 3,
-                        `maxDailyLoss` REAL NOT NULL DEFAULT 20.0,
-                        `stopTradingOnLimit` INTEGER NOT NULL DEFAULT 1,
-                        `realArmed` INTEGER NOT NULL DEFAULT 0,
-                        `requirePerOrderConfirm` INTEGER NOT NULL DEFAULT 1,
-                        `maxMartingaleSteps` INTEGER NOT NULL DEFAULT 3,
-                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (`userId`, `id`)
-                    )
-                """.trimIndent())
-                db.execSQL("CREATE INDEX IF NOT EXISTS `index_user_settings_userId` ON `user_settings` (`userId`)")
-                db.execSQL("""
-                    INSERT OR REPLACE INTO `user_settings`
-                        (`id`, `userId`, `windowSize`, `selectedDigit`, `recoveryDigit`,
-                         `recoveryDirection`, `comparisonOperator`, `thresholdPercent`,
-                         `analysisMetric`, `minimumSampleSize`, `stakeAmount`, `takeProfit`,
-                         `stopLoss`, `durationUnit`, `durationValue`, `martingaleEnabled`,
-                         `tradeType`, `randomMarkets`, `maxTradesPerMarket`, `maxDailyLoss`,
-                         `stopTradingOnLimit`, `realArmed`, `requirePerOrderConfirm`,
-                         `maxMartingaleSteps`, `updatedAt`)
-                    SELECT `id`, `userId`, `windowSize`, `selectedDigit`, `recoveryDigit`,
-                           `recoveryDirection`, `comparisonOperator`, `thresholdPercent`,
-                           'differs_pct', `minimumSampleSize`, `stakeAmount`, `takeProfit`,
-                           `stopLoss`, `durationUnit`, `durationValue`, `martingaleEnabled`,
-                           `tradeType`, `randomMarkets`, `maxTradesPerMarket`, `maxDailyLoss`,
-                           `stopTradingOnLimit`, `realArmed`, `requirePerOrderConfirm`,
-                           `maxMartingaleSteps`, `updatedAt`
-                    FROM `user_settings_v5`
-                """)
-                db.execSQL("DROP TABLE `user_settings_v5`")
-
-                // 2. analysis_events: add analysisMetric, backfilled as equals_pct (see KDoc).
-                //    AUTOINCREMENT is preserved by renaming the table aside, so sqlite_sequence
-                //    keeps the real rowid high-water mark and no future id can collide.
-                db.execSQL("ALTER TABLE `analysis_events` RENAME TO `analysis_events_v5`")
-                db.execSQL("""
-                    CREATE TABLE IF NOT EXISTS `analysis_events` (
-                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                        `userId` TEXT NOT NULL,
-                        `marketSymbol` TEXT NOT NULL,
-                        `targetDigit` INTEGER NOT NULL,
-                        `windowSize` INTEGER NOT NULL,
-                        `sampleSize` INTEGER NOT NULL,
-                        `occurrenceCount` INTEGER NOT NULL,
-                        `observedPercent` REAL NOT NULL,
-                        `analysisMetric` TEXT NOT NULL DEFAULT 'differs_pct',
-                        `comparisonOperator` TEXT NOT NULL,
-                        `thresholdPercent` REAL NOT NULL,
-                        `conditionMet` INTEGER NOT NULL,
-                        `eventTimestamp` INTEGER NOT NULL DEFAULT 0,
-                        FOREIGN KEY (`userId`) REFERENCES `profiles`(`id`) ON DELETE CASCADE
-                    )
-                """.trimIndent())
-                db.execSQL("CREATE INDEX IF NOT EXISTS `index_analysis_events_userId` ON `analysis_events` (`userId`)")
-                db.execSQL("""
-                    INSERT INTO `analysis_events`
-                        (`userId`, `marketSymbol`, `targetDigit`, `windowSize`, `sampleSize`,
-                         `occurrenceCount`, `observedPercent`, `analysisMetric`,
-                         `comparisonOperator`, `thresholdPercent`, `conditionMet`, `eventTimestamp`)
-                    SELECT `userId`, `marketSymbol`, `targetDigit`, `windowSize`, `sampleSize`,
-                           `occurrenceCount`, `observedPercent`, 'equals_pct',
-                           `comparisonOperator`, `thresholdPercent`, `conditionMet`, `eventTimestamp`
-                    FROM `analysis_events_v5`
-                """)
-                db.execSQL("DROP TABLE `analysis_events_v5`")
+                // Purely additive: one new column per table.
+                //
+                // ALTER TABLE ADD COLUMN is used deliberately instead of the rename-recreate-copy
+                // dance. Recreating is only necessary when a column is dropped, renamed or retyped.
+                // Recreating here silently broke two things that are easy to miss:
+                //   - the recreated user_settings DDL omitted the FOREIGN KEY to profiles, and
+                //     Room validates foreign keys, not just columns;
+                //   - `CREATE INDEX IF NOT EXISTS index_user_settings_userId` became a no-op,
+                //     because the index name was still taken by the index attached to the renamed
+                //     backup table, so the new table ended up with no index at all.
+                // ADD COLUMN preserves the existing foreign keys, indices and every row untouched.
+                //
+                // analysis_events is backfilled 'equals_pct' because those rows really do hold the
+                // target digit's raw frequency, recorded before the differs fix. Labelling them
+                // 'differs_pct' would rewrite their meaning silently.
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `analysisMetric` TEXT NOT NULL DEFAULT 'differs_pct'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `analysis_events` ADD COLUMN `analysisMetric` TEXT NOT NULL DEFAULT 'equals_pct'"
+                )
             }
         }
     }

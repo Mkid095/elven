@@ -47,7 +47,7 @@ data class UserProfileEntity(
 data class UserSettingsEntity(
     val id: Long = 1L,
     val userId: String,
-    val windowSize: Int = 30,
+    val windowSize: Int = 100,
     val selectedDigit: Int = 2,
     val recoveryDigit: Int = 4,
     val recoveryDirection: String = "OVER",

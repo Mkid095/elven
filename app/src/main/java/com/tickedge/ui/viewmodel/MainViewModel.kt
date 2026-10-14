@@ -44,8 +44,12 @@ import kotlinx.coroutines.launch
  */
 private const val ANONYMOUS_USER_ID = "default_trader"
 
-/** Smallest analysis window the UI allows, matching the Analysis screen's stepper floor. */
-private const val MIN_ANALYSIS_WINDOW = 10
+/**
+ * Smallest analysis window, per spec. Note a window below [MIN_ANALYSIS_SAMPLE] can never
+ * satisfy a threshold, because the minimum-sample guard rejects the evaluation first — the UI
+ * says so rather than silently forbidding the value.
+ */
+private const val MIN_ANALYSIS_WINDOW = 1
 
 /** Largest analysis window; matches the retained-history cap in [DerivWebSocketService]. */
 private const val MAX_ANALYSIS_WINDOW = 1000

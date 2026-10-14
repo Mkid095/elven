@@ -318,7 +318,7 @@ fun AnalysisScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
-                            onClick = { onWindowSizeChanged((currentMarket.configuredWindowSize - 10).coerceAtLeast(10)) },
+                            onClick = { onWindowSizeChanged((currentMarket.configuredWindowSize - 10).coerceAtLeast(1)) },
                             modifier = Modifier
                                 .size(36.dp)
                                 .background(Color(0xFF232734), RoundedCornerShape(8.dp))
