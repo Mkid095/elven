@@ -16,11 +16,15 @@ import kotlinx.coroutines.withContext
  * Transparent trampoline that receives the Deriv OAuth redirect, completes the code->token
  * exchange (persisting the token to encrypted storage), and returns to the app.
  *
- * Two redirect forms reach this activity, and both are handled identically:
- *  - `https://elven.nextmavens.com/oauth/callback?code=...` — verified Android App Link, the
- *    primary path. Deriv redirects here and Android opens the app directly.
- *  - `elven://oauth/callback?code=...` — custom-scheme fallback, used only when App Link
- *    verification fails and the browser lands on elven-web's callback page instead.
+ * Two redirect forms can match this activity's intent filters, and both are handled identically:
+ *  - `https://elven.nextmavens.com/oauth/callback?code=...` — verified Android App Link, and
+ *    the only path Deriv will actually use: this exact URI is registered on the Deriv app,
+ *    while `elven://oauth/callback` is NOT, so Deriv rejects it with `invalid_request` before
+ *    any redirect happens. The custom-scheme filter is kept only so the app can still be opened
+ *    manually; it is not a working fallback for sign-in.
+ *
+ * Because the App Link is the sole route, assetlinks.json must keep publishing the fingerprint
+ * of the certificate that signed the installed build, or Android will not route the redirect here.
  *
  * ## Lifecycle Safety
  *
@@ -40,6 +44,16 @@ class DerivOAuthRedirectActivity : Activity() {
      * scope is used instead, cancelled in [onDestroy] so a destroyed activity leaks no work.
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * The one-time authorization code can only be redeemed once, and [finish] is not idempotent.
+     * [onCreate] and [onNewIntent] can both deliver the same callback (activity recreation, OEM
+     * intent redelivery), which previously ran the code->token exchange twice and called finish
+     * twice — the exchange raced against its own `clearPendingAuth`, producing intermittent
+     * failures and `W ActivityTaskManager: Duplicate finish request`.
+     */
+    private val redirectHandled = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +81,9 @@ class DerivOAuthRedirectActivity : Activity() {
             finishAndGoToMain()
             return
         }
+        // Consume the guard only once there is a real redirect to process, so a null-intent
+        // launch does not block the actual callback that may follow via onNewIntent.
+        if (!redirectHandled.compareAndSet(false, true)) return
         val client = DerivOAuthClient.share(applicationContext, scope)
         scope.launch {
             // Failure is already reflected in authState; either way return to MainActivity.
@@ -76,6 +93,7 @@ class DerivOAuthRedirectActivity : Activity() {
     }
 
     private fun finishAndGoToMain() {
+        if (!finished.compareAndSet(false, true)) return
         val launcher = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }

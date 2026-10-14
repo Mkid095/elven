@@ -303,14 +303,26 @@ class DerivOAuthClient(
                     // openid scope may also return open_id
                     val openId = userInfo.optString("open_id", "").ifBlank { null }
 
-                    tokenStore.saveTokens(
-                        accessToken = accessToken,
-                        refreshToken = refreshToken,
-                        userId = userId,
-                        openId = openId,
-                        expiresAtEpochMs = expiresAt,
-                        idToken = idToken
-                    )
+                    // Persisting is deliberately NOT inside the outer try. If it fails, Deriv
+                    // already issued valid tokens and the userinfo call already succeeded — the
+                    // fault is local storage, and saying "token exchange error" sends the user
+                    // hunting for a Deriv problem that does not exist.
+                    try {
+                        tokenStore.saveTokens(
+                            accessToken = accessToken,
+                            refreshToken = refreshToken,
+                            userId = userId,
+                            openId = openId,
+                            expiresAtEpochMs = expiresAt,
+                            idToken = idToken
+                        )
+                    } catch (e: Exception) {
+                        _authState.value = AuthState.AuthenticationError(
+                            "Signed in with Deriv, but could not save the session on this " +
+                                "device: ${e.message}"
+                        )
+                        return@use false
+                    }
 
                     // `id` MUST equal stableKey. Downstream, local writes scope rows by
                     // DerivUser.stableKey while local reads scope them by DerivUser.id. If those

@@ -33,7 +33,18 @@ class SecureTokenStore(
     private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     private fun getOrCreateKey(): SecretKey {
-        keyStore().getKey(keyAlias, null)?.let { return it as SecretKey }
+        loadKey()?.let { return it }
+        return createKey()
+    }
+
+    /** The existing key, or null when it is absent *or* cannot be loaded. */
+    private fun loadKey(): SecretKey? = try {
+        keyStore().getKey(keyAlias, null) as? SecretKey
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun createKey(): SecretKey {
         val generator = KeyGenerator.getInstance("AES", "AndroidKeyStore")
         generator.init(
             KeyGenParameterSpec.Builder(
@@ -46,22 +57,50 @@ class SecureTokenStore(
         return generator.generateKey()
     }
 
-    private fun encrypt(plain: String): String {
+    private fun deleteKey() {
+        runCatching { keyStore().deleteEntry(keyAlias) }
+    }
+
+    /**
+     * Encrypt, recovering from an unusable key.
+     *
+     * `KeyStoreException: Keystore operation failed` leaves the alias present but unusable, so
+     * a plain get-then-use retries the same broken key forever and sign-in stays broken until
+     * the app's data is cleared. Probing with a real encrypt detects that state and replaces the
+     * alias. The retry's exception propagates if a fresh key also fails, so a genuinely
+     * unavailable keystore still surfaces instead of silently writing plaintext.
+     *
+     * Cost: one wasted encrypt on the recovery path only.
+     */
+    private fun encrypt(plain: String): String =
+        runCatching { encryptWith(plain) }.getOrElse {
+            deleteKey()
+            encryptWith(plain)
+        }
+
+    private fun encryptWith(plain: String): String {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.doFinal(plain.toByteArray(Charsets.UTF_8))
         return Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)
     }
 
+    /**
+     * Decrypt, returning null on any failure.
+     *
+     * `cipher.init` is inside the try: a bad key throws there rather than at doFinal, and this
+     * runs on the read path during startup and on every token lookup. Letting it escape would
+     * turn a recoverable storage problem into a crash.
+     */
     private fun decrypt(data: String?): JSONObject? {
         if (data.isNullOrBlank()) return null
-        val combined = Base64.decode(data, Base64.NO_WRAP)
-        if (combined.size <= GCM_IV_LENGTH) return null
-        val iv = combined.copyOfRange(0, GCM_IV_LENGTH)
-        val body = combined.copyOfRange(GCM_IV_LENGTH, combined.size)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
         return try {
+            val combined = Base64.decode(data, Base64.NO_WRAP)
+            if (combined.size <= GCM_IV_LENGTH) return null
+            val iv = combined.copyOfRange(0, GCM_IV_LENGTH)
+            val body = combined.copyOfRange(GCM_IV_LENGTH, combined.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
             JSONObject(String(cipher.doFinal(body), Charsets.UTF_8))
         } catch (e: Exception) {
             null
