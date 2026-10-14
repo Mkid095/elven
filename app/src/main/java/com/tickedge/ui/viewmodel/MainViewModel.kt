@@ -16,6 +16,7 @@ import com.tickedge.data.local.AnalysisEventEntity
 import com.tickedge.data.local.UserProfileEntity
 import com.tickedge.data.local.UserSettingsEntity
 import com.tickedge.data.model.AccountType
+import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.data.model.MarketState
 import com.tickedge.data.model.SystemConfig
@@ -42,6 +43,20 @@ import kotlinx.coroutines.launch
  * attributes legacy rows to, so anonymous history stays visible after the upgrade.
  */
 private const val ANONYMOUS_USER_ID = "default_trader"
+
+/** Smallest analysis window the UI allows, matching the Analysis screen's stepper floor. */
+private const val MIN_ANALYSIS_WINDOW = 10
+
+/** Largest analysis window; matches the retained-history cap in [DerivWebSocketService]. */
+private const val MAX_ANALYSIS_WINDOW = 1000
+
+/**
+ * Ticks required before a threshold is considered meaningful.
+ *
+ * Below this the window is too short for a percentage to mean anything, and a single tick swinging
+ * the result by 10 points would otherwise fire entries on noise.
+ */
+private const val MIN_ANALYSIS_SAMPLE = 10
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -328,6 +343,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _realArmed.value = it.realArmed
             _requirePerOrderConfirm.value = it.requirePerOrderConfirm
             _maxMartingaleSteps.value = it.maxMartingaleSteps
+            // The window lived only in the service before, so it reset to 30 on every launch.
+            // Applying it here makes the persisted setting the one actually in force.
+            webSocketService.setWindowSize(_tradeSettings.value.analysisWindowSize)
         }
     }
 
@@ -337,13 +355,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val currentSettings = _tradeSettings.value
                 markets.values.forEach { state ->
                     val digitFreq = state.digitFrequencies.firstOrNull { it.digit == currentSettings.targetDigit }
-                    if (digitFreq != null && state.sampleSize >= 10) {
+                    if (digitFreq != null && state.sampleSize >= MIN_ANALYSIS_SAMPLE) {
+                        // Same metric resolution the trading engine uses, so a logged event and a
+                        // placed trade can never disagree about what was measured.
+                        val observedPercent = DigitAnalysisEngine.observedPercentFor(
+                            frequencies = state.digitFrequencies,
+                            targetDigit = currentSettings.targetDigit,
+                            metric = currentSettings.analysisMetric
+                        )
                         val met = DigitAnalysisEngine.evaluateCondition(
-                            observedPercent = digitFreq.percentage,
+                            observedPercent = observedPercent,
                             thresholdPercent = currentSettings.thresholdPercent,
                             operator = currentSettings.comparisonOperator,
                             sampleSize = state.sampleSize,
-                            minimumSampleSize = 10
+                            minimumSampleSize = MIN_ANALYSIS_SAMPLE
                         )
                         if (met) {
                             recordAnalysisEvent(
@@ -352,7 +377,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 windowSize = state.configuredWindowSize,
                                 sampleSize = state.sampleSize,
                                 occurrenceCount = digitFreq.count,
-                                observedPercent = digitFreq.percentage,
+                                observedPercent = observedPercent,
+                                metric = currentSettings.analysisMetric,
                                 operator = currentSettings.comparisonOperator,
                                 thresholdPercent = currentSettings.thresholdPercent
                             )
@@ -370,6 +396,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sampleSize: Int,
         occurrenceCount: Int,
         observedPercent: Double,
+        metric: AnalysisMetric,
         operator: ComparisonOperator,
         thresholdPercent: Double
     ) {
@@ -383,6 +410,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sampleSize = sampleSize,
                     occurrenceCount = occurrenceCount,
                     observedPercent = observedPercent,
+                    analysisMetric = metric.symbol,
                     comparisonOperator = operator.symbol,
                     thresholdPercent = thresholdPercent,
                     conditionMet = true,
@@ -405,7 +433,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun switchStatsPeriod(period: String) { _statsPeriod.value = period }
     fun selectMarket(symbol: String) { _selectedMarketSymbol.value = symbol }
     fun setInspectedDigit(digit: Int?) { _inspectedDigit.value = digit }
-    fun setWindowSize(size: Int) { webSocketService.setWindowSize(size) }
+    /**
+     * Change the analysis window. Mirrored into [tradeSettings] so the Analysis screen's +/- control
+     * and the Trade Settings field cannot drift apart, and persisted so it survives a restart.
+     */
+    fun setWindowSize(size: Int) {
+        val bounded = size.coerceIn(MIN_ANALYSIS_WINDOW, MAX_ANALYSIS_WINDOW)
+        webSocketService.setWindowSize(bounded)
+        if (_tradeSettings.value.analysisWindowSize != bounded) {
+            _tradeSettings.value = _tradeSettings.value.copy(analysisWindowSize = bounded)
+            persistSettings()
+        }
+    }
 
     fun updateTradeSettings(settings: TradeSettings) {
         _tradeSettings.value = settings
@@ -440,13 +479,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 UserSettingsEntity(
                     id = 1L,
                     userId = currentUserId,
-                    windowSize = 30,
+                    windowSize = s.analysisWindowSize,
                     selectedDigit = s.targetDigit,
                     recoveryDigit = s.recoveryDigit,
                     recoveryDirection = s.recoveryDirection,
                     comparisonOperator = s.comparisonOperator.symbol,
                     thresholdPercent = s.thresholdPercent,
-                    minimumSampleSize = 10,
+                    analysisMetric = s.analysisMetric.symbol,
+                    minimumSampleSize = MIN_ANALYSIS_SAMPLE,
                     stakeAmount = s.stakeAmount,
                     takeProfit = s.takeProfit,
                     stopLoss = s.stopLoss,
@@ -517,6 +557,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         comparisonOperator = ComparisonOperator.values()
             .firstOrNull { it.symbol == e.comparisonOperator } ?: ComparisonOperator.GREATER_THAN,
         thresholdPercent = e.thresholdPercent,
+        analysisMetric = AnalysisMetric.values()
+            .firstOrNull { it.symbol == e.analysisMetric } ?: AnalysisMetric.DIFFERS_PERCENT,
+        analysisWindowSize = e.windowSize.coerceIn(MIN_ANALYSIS_WINDOW, MAX_ANALYSIS_WINDOW),
         stakeAmount = e.stakeAmount,
         takeProfit = e.takeProfit,
         stopLoss = e.stopLoss,

@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.data.model.TradeDurationUnit
 import com.tickedge.data.model.TradeSettings
@@ -63,6 +64,20 @@ import com.tickedge.ui.theme.TextPrimary
 import com.tickedge.ui.theme.TextSecondary
 import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
+
+/** Smallest analysis window accepted, matching the Analysis screen's stepper floor. */
+private const val MIN_ANALYSIS_WINDOW = 10
+
+/** Largest analysis window; matches the retained-history cap in the websocket service. */
+private const val MAX_ANALYSIS_WINDOW = 1000
+
+/**
+ * Below this, a Differs-% threshold is satisfied on essentially every tick.
+ *
+ * P(last digit != d) is ~90% on live ticks by construction, so a threshold under the 90s does not
+ * select moments — it just always passes. Used only to warn, never to clamp the user's value.
+ */
+private const val DIFFERS_FLOOR_THRESHOLD = 85.0
 
 @Composable
 fun TradeSettingsScreen(
@@ -76,6 +91,8 @@ fun TradeSettingsScreen(
     var recoveryDirection by remember { mutableStateOf(currentSettings.recoveryDirection) }
     var operator by remember { mutableStateOf(currentSettings.comparisonOperator) }
     var thresholdText by remember { mutableStateOf("${currentSettings.thresholdPercent}") }
+    var analysisMetric by remember { mutableStateOf(currentSettings.analysisMetric) }
+    var analysisWindowText by remember { mutableStateOf("${currentSettings.analysisWindowSize}") }
     var stakeText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stakeAmount)) }
     var takeProfitText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.takeProfit)) }
     var stopLossText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stopLoss)) }
@@ -85,6 +102,9 @@ fun TradeSettingsScreen(
 
     // Parse live numeric values for real-time table calculation
     val parsedStake = stakeText.toDoubleOrNull() ?: 1.00
+
+    val parsedThreshold = thresholdText.toDoubleOrNull() ?: currentSettings.thresholdPercent
+    val parsedWindow = analysisWindowText.toIntOrNull() ?: currentSettings.analysisWindowSize
 
     // Compute winning digits for recovery
     val winningDigits = if (recoveryDirection.equals("OVER", ignoreCase = true)) {
@@ -255,6 +275,18 @@ fun TradeSettingsScreen(
                             ),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier.fillMaxWidth().testTag("custom_threshold_input")
+                        )
+
+                        AnalysisConditionFields(
+                            targetDigit = targetDigit,
+                            metric = analysisMetric,
+                            onMetricChange = { analysisMetric = it },
+                            windowText = analysisWindowText,
+                            onWindowTextChange = { analysisWindowText = it },
+                            thresholdPercent = parsedThreshold,
+                            minWindow = MIN_ANALYSIS_WINDOW,
+                            maxWindow = MAX_ANALYSIS_WINDOW,
+                            differsFloorThreshold = DIFFERS_FLOOR_THRESHOLD
                         )
 
                         // Explanatory Banner: WHY we have Target Digit and Threshold Above/Below
@@ -852,7 +884,6 @@ fun TradeSettingsScreen(
             Box(modifier = Modifier.padding(16.dp)) {
                 Button(
                     onClick = {
-                        val parsedThreshold = thresholdText.toDoubleOrNull() ?: currentSettings.thresholdPercent
                         val parsedStakeVal = stakeText.toDoubleOrNull() ?: currentSettings.stakeAmount
                         val parsedTP = takeProfitText.toDoubleOrNull() ?: currentSettings.takeProfit
                         val parsedSL = stopLossText.toDoubleOrNull() ?: currentSettings.stopLoss
@@ -865,6 +896,11 @@ fun TradeSettingsScreen(
                                 recoveryDirection = recoveryDirection,
                                 comparisonOperator = operator,
                                 thresholdPercent = parsedThreshold,
+                                analysisMetric = analysisMetric,
+                                analysisWindowSize = parsedWindow.coerceIn(
+                                    MIN_ANALYSIS_WINDOW,
+                                    MAX_ANALYSIS_WINDOW
+                                ),
                                 stakeAmount = parsedStakeVal,
                                 takeProfit = parsedTP,
                                 stopLoss = parsedSL,

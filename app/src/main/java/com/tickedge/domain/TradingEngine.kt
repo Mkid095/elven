@@ -195,10 +195,19 @@ class TradingEngine(
         getMarketState: (String) -> MarketState?
     ): Boolean {
         val state = getMarketState(symbol) ?: return false
-        val freq = state.digitFrequencies.firstOrNull { it.digit == settings.targetDigit }
-            ?: return false
+        if (state.digitFrequencies.none { it.digit == settings.targetDigit }) return false
+
+        // The contract bought is DIGITDIFF, which wins when the final tick's last digit is NOT
+        // the target. Comparing the raw equals-% against the threshold therefore inverted the
+        // entry: it fired precisely when the target digit was over-represented and the contract
+        // was most likely to lose. Resolve the configured metric instead of assuming one.
+        val observedPercent = DigitAnalysisEngine.observedPercentFor(
+            frequencies = state.digitFrequencies,
+            targetDigit = settings.targetDigit,
+            metric = settings.analysisMetric
+        )
         return DigitAnalysisEngine.evaluateCondition(
-            observedPercent = freq.percentage,
+            observedPercent = observedPercent,
             thresholdPercent = settings.thresholdPercent,
             operator = settings.comparisonOperator,
             sampleSize = state.sampleSize,

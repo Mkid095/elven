@@ -53,6 +53,8 @@ data class UserSettingsEntity(
     val recoveryDirection: String = "OVER",
     val comparisonOperator: String = ">",
     val thresholdPercent: Double = 70.0,
+    /** Which probability `thresholdPercent` is compared against; see `AnalysisMetric`. */
+    val analysisMetric: String = "differs_pct",
     val minimumSampleSize: Int = 10,
     val stakeAmount: Double = 1.00,
     val takeProfit: Double = 0.50,
@@ -99,6 +101,12 @@ data class AnalysisEventEntity(
     val sampleSize: Int,
     val occurrenceCount: Int,
     val observedPercent: Double,
+    /**
+     * Which metric `observedPercent` holds. Without this, rows recorded before the differs fix
+     * would silently change meaning: the same column stores equals-% in old rows and differs-%
+     * in new ones, and nothing on the row says which.
+     */
+    val analysisMetric: String = "differs_pct",
     val comparisonOperator: String,
     val thresholdPercent: Double,
     val conditionMet: Boolean,

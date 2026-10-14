@@ -218,6 +218,7 @@ fun TickEdgeApp(
                 "analysis" -> AnalysisScreen(
                     marketsState = marketsState,
                     selectedSymbol = selectedSymbol,
+                    targetDigit = tradeSettings.targetDigit,
                     inspectedDigit = inspectedDigit,
                     onMarketSelected = { viewModel.selectMarket(it) },
                     onDigitSelected = { viewModel.setInspectedDigit(it) },

@@ -64,10 +64,24 @@ import com.tickedge.ui.theme.TextSecondary
 import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
+/** Tab identifiers, kept as constants so the label and the branch cannot drift apart. */
+private const val DIFFERS_TAB = "Differs Analysis"
+private const val OVER_UNDER_TAB = "Over & Under Analysis"
+
+/**
+ * Above this, a Differs contract on [targetDigit] is on the favourable side.
+ *
+ * P(last digit != d) is ~90% by construction on live ticks, so anything meaningfully below that
+ * means the target digit is running hot and the contract is the likelier loser. Used to colour the
+ * headline and to annotate why, never to gate a trade from this screen.
+ */
+private const val DIFFERS_HEALTHY_THRESHOLD = 88.0
+
 @Composable
 fun AnalysisScreen(
     marketsState: Map<String, MarketState>,
     selectedSymbol: String,
+    targetDigit: Int,
     inspectedDigit: Int?,
     onMarketSelected: (String) -> Unit,
     onDigitSelected: (Int) -> Unit,
@@ -80,8 +94,12 @@ fun AnalysisScreen(
         shortName = "Market"
     )
 
-    // Subtabs: "Volatility Analysis" (Digit Tick Distribution) vs "Over & Under Analysis"
-    var currentTab by remember { mutableStateOf("Volatility Analysis") }
+    // Subtabs: "Differs Analysis" (Matches/Differs per digit) vs "Over & Under Analysis"
+    var currentTab by remember { mutableStateOf(DIFFERS_TAB) }
+
+    // The headline digit is whatever the user last tapped, defaulting to the configured target so
+    // the screen opens on the number the bot actually trades.
+    val headlineDigit = inspectedDigit ?: targetDigit
 
     // Toggle inside Over & Under Analysis: "All", "Over (>)", "Under (<)"
     var overUnderFilter by remember { mutableStateOf("All") }
@@ -90,6 +108,10 @@ fun AnalysisScreen(
     val overUnderStatsList = remember(currentMarket.ticks) {
         DigitAnalysisEngine.computeOverUnderStats(currentMarket.ticks)
     }
+    val differsStatsList = remember(currentMarket.ticks) {
+        DigitAnalysisEngine.computeDiffersStats(currentMarket.ticks)
+    }
+    val headlineDiffers = differsStatsList.firstOrNull { it.digit == headlineDigit }
 
     LazyColumn(
         modifier = modifier
@@ -123,7 +145,7 @@ fun AnalysisScreen(
             }
         }
 
-        // Subtabs: Volatility Analysis vs Over & Under Analysis
+        // Subtabs: Differs Analysis vs Over & Under Analysis
         item {
             Row(
                 modifier = Modifier
@@ -131,7 +153,7 @@ fun AnalysisScreen(
                     .background(SurfaceDarkCard, RoundedCornerShape(12.dp))
                     .padding(4.dp)
             ) {
-                listOf("Volatility Analysis", "Over & Under Analysis").forEach { tab ->
+                listOf(DIFFERS_TAB, OVER_UNDER_TAB).forEach { tab ->
                     val isSelected = currentTab == tab
                     Box(
                         modifier = Modifier
@@ -340,7 +362,65 @@ fun AnalysisScreen(
         }
 
         // ================= TAB 1: VOLATILITY ANALYSIS (DIGIT TICK FREQUENCIES) =================
-        if (currentTab == "Volatility Analysis") {
+        if (currentTab == DIFFERS_TAB) {
+            // Headline: the number that actually decides a Differs contract, for the digit the
+            // bot is currently configured to trade. This is the figure the entry threshold compares
+            // against, so it is shown first rather than buried in a per-digit table.
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141824)),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                    modifier = Modifier.fillMaxWidth().testTag("differs_headline")
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Differs from digit $headlineDigit",
+                            fontSize = 13.sp,
+                            color = TextSecondary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        val differsPct = headlineDiffers?.differsPercentage ?: 0.0
+                        Text(
+                            text = String.format(Locale.US, "%.1f%%", differsPct),
+                            fontSize = 34.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (differsPct >= DIFFERS_HEALTHY_THRESHOLD) StatGreen else VividYellow
+                        )
+                        Text(
+                            text = "${headlineDiffers?.differsCount ?: 0} of " +
+                                "${currentMarket.sampleSize} ticks differ from $headlineDigit " +
+                                "(target digit hit ${String.format(Locale.US, "%.1f%%", headlineDiffers?.matchPercentage ?: 0.0)} of the time)",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                        if (differsPct < DIFFERS_HEALTHY_THRESHOLD && currentMarket.sampleSize > 0) {
+                            Text(
+                                text = "Below ${String.format(Locale.US, "%.0f", DIFFERS_HEALTHY_THRESHOLD)}% — " +
+                                    "digit $headlineDigit is running hot, so a Differs contract on it " +
+                                    "is currently the riskier side.",
+                                fontSize = 11.sp,
+                                color = VividYellow
+                            )
+                        }
+                        Text(
+                            text = "Tap any digit below to inspect it.",
+                            fontSize = 10.sp,
+                            color = TextSecondary.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+
+            item {
+                Text(
+                    text = "Digit Distribution",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary
+                )
+            }
+
             item {
                 Row(
                     modifier = Modifier
@@ -357,13 +437,13 @@ fun AnalysisScreen(
                 }
             }
 
-            // 10 Digits (0 to 9)
+            // 10 Digits (0 to 9) — tapping re-targets the headline above.
             items(currentMarket.digitFrequencies) { freq ->
                 DigitFrequencyRow(
                     frequency = freq,
-                    isSelected = false,
+                    isSelected = freq.digit == headlineDigit,
                     maxPercentage = maxPercentage,
-                    onClick = { /* informative view */ }
+                    onClick = { onDigitSelected(freq.digit) }
                 )
             }
 

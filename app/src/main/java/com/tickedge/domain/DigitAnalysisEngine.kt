@@ -1,6 +1,8 @@
 package com.tickedge.domain
 
+import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
+import com.tickedge.data.model.DiffersStats
 import com.tickedge.data.model.DigitFrequency
 import com.tickedge.data.model.OverUnderStats
 import com.tickedge.data.model.TickObservation
@@ -95,8 +97,7 @@ object DigitAnalysisEngine {
      * Under: digits strictly less than d
      * Matches: digits equal to d
      */
-    fun computeOverUnderStats(ticks: List<TickObservation>): List<OverUnderStats> {
-        val total = ticks.size.coerceAtLeast(1).toDouble()
+    fun computeOverUnderStats(ticks: List<TickObservation>): List<OverUnderStats> {        val total = ticks.size.coerceAtLeast(1).toDouble()
 
         return (0..9).map { d ->
             val overCount = ticks.count { it.lastDigit > d }
@@ -113,6 +114,60 @@ object DigitAnalysisEngine {
                 matchPercentage = (matchCount / total) * 100.0
             )
         }
+    }
+
+    /**
+     * Computes Matches/Differs statistics for digits 0 through 9 across the selected tick window.
+     *
+     * Mirrors [computeOverUnderStats] so the two analysis tabs read identically. [differsPercentage]
+     * is the probability that decides a `DIGITDIFF` contract: it settles as a win when the last
+     * digit of the final tick is not [digit], so a high value means a safe contract.
+     */
+    fun computeDiffersStats(ticks: List<TickObservation>): List<DiffersStats> {
+        val total = ticks.size.coerceAtLeast(1).toDouble()
+
+        return (0..9).map { d ->
+            val matchCount = ticks.count { it.lastDigit == d }
+            val differsCount = ticks.count { it.lastDigit != d }
+            DiffersStats(
+                digit = d,
+                matchCount = matchCount,
+                matchPercentage = (matchCount / total) * 100.0,
+                differsCount = differsCount,
+                differsPercentage = (differsCount / total) * 100.0
+            )
+        }
+    }
+
+    /**
+     * Differs percentage for [digit], read from already-computed frequencies.
+     *
+     * Deliberately does not re-scan the tick window: `TradingEngine` calls this on every poll tick
+     * for every subscribed market, where re-counting [MarketState.ticks] would turn a cheap lookup
+     * into an O(window) pass per market per second.
+     *
+     * Returns 100.0 for an unknown digit — no observed ticks equal it, so nothing differs from it
+     * either, and the contract is as safe as the data can justify claiming.
+     */
+    fun differsPercentFor(frequencies: List<DigitFrequency>, digit: Int): Double {
+        val freq = frequencies.firstOrNull { it.digit == digit } ?: return 100.0
+        return 100.0 - freq.percentage
+    }
+
+    /**
+     * Resolves the observed percentage for the configured [AnalysisMetric].
+     *
+     * Single funnel so the trading engine and the analysis-event log can never disagree about what
+     * the threshold was compared against.
+     */
+    fun observedPercentFor(
+        frequencies: List<DigitFrequency>,
+        targetDigit: Int,
+        metric: AnalysisMetric
+    ): Double = when (metric) {
+        AnalysisMetric.DIFFERS_PERCENT -> differsPercentFor(frequencies, targetDigit)
+        AnalysisMetric.EQUALS_PERCENT ->
+            frequencies.firstOrNull { it.digit == targetDigit }?.percentage ?: 0.0
     }
 
     /**

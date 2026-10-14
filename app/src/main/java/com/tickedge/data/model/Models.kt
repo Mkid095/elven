@@ -28,6 +28,21 @@ enum class ComparisonOperator(val symbol: String, val label: String) {
     LESS_OR_EQUAL("<=", "Below or equal (<=)")
 }
 
+/**
+ * Which probability the entry threshold is measured against.
+ *
+ * The app buys `DIGITDIFF`, which Deriv settles as a win when the last digit of the final tick is
+ * NOT the chosen digit. So the probability that actually decides the contract is
+ * `P(lastDigit != target)`, not `P(lastDigit == target)`. Measuring the wrong one inverts the
+ * entry condition: a high equals-% means the contract is most likely to LOSE.
+ *
+ * [symbol] is persisted, so it must stay stable across renames.
+ */
+enum class AnalysisMetric(val symbol: String, val label: String) {
+    DIFFERS_PERCENT("differs_pct", "Differs % (≠ digit)"),
+    EQUALS_PERCENT("equals_pct", "Equals % (digit)")
+}
+
 enum class TradeType(val displayName: String) {
     DIFFERS("Differs (Main)"),
     OVER_UNDER("Over & Under (Recovery)")
@@ -90,6 +105,20 @@ data class OverUnderStats(
     val matchPercentage: Double
 )
 
+/**
+ * Matches/Differs statistics for digits 0 through 9 across the selected tick window.
+ *
+ * [differsPercentage] is the probability that decides a `DIGITDIFF` contract: it wins when the
+ * last digit of the final tick is not [digit]. [matchPercentage] is its exact complement.
+ */
+data class DiffersStats(
+    val digit: Int,
+    val matchCount: Int,
+    val matchPercentage: Double,
+    val differsCount: Int,
+    val differsPercentage: Double
+)
+
 data class MarketState(
     val symbol: String,
     val displayName: String,
@@ -115,6 +144,10 @@ data class TradeSettings(
     val recoveryDirection: String = "OVER", // "OVER" or "UNDER"
     val comparisonOperator: ComparisonOperator = ComparisonOperator.GREATER_THAN,
     val thresholdPercent: Double = 70.0,
+    /** Which probability [thresholdPercent] is compared against. See [AnalysisMetric]. */
+    val analysisMetric: AnalysisMetric = AnalysisMetric.DIFFERS_PERCENT,
+    /** How many recent ticks the analysis is computed over (10..1000). */
+    val analysisWindowSize: Int = 30,
     val stakeAmount: Double = 1.00,
     val takeProfit: Double = 0.50,
     val stopLoss: Double = 5.00,
