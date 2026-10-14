@@ -1,15 +1,20 @@
 package com.tickedge.data.local
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * Local profile + settings. Balances are NOT seeded here: live balances come from the real
+ * Local profile per user. Balances are NOT seeded here: live balances come from the real
  * Deriv accounts (see DerivClient). Fields default to neutral/zero.
+ *
+ * @param id Stable user identity (e.g. Deriv OAuth `open_id` or `sub` claim)
  */
 @Entity(tableName = "profiles")
 data class UserProfileEntity(
-    @PrimaryKey val id: String = "default_trader",
+    @PrimaryKey
+    val id: String,
     val displayName: String = "",
     val email: String = "",
     val simulatedBalance: Double = 0.0,
@@ -19,10 +24,29 @@ data class UserProfileEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "user_settings")
+/**
+ * Per-user settings. The composite primary key (userId, id) ensures each user has exactly one
+ * settings row while allowing the legacy singleton pattern to coexist during migration.
+ *
+ * @param id Always 1L — maintained for legacy compatibility during migration
+ * @param userId Stable user identity matching profiles.id
+ */
+@Entity(
+    tableName = "user_settings",
+    primaryKeys = ["userId", "id"],
+    foreignKeys = [
+        ForeignKey(
+            entity = UserProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["userId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("userId")]
+)
 data class UserSettingsEntity(
-    @PrimaryKey val id: Long = 1L,
-    val userId: String = "default_trader",
+    val id: Long = 1L,
+    val userId: String,
     val windowSize: Int = 30,
     val selectedDigit: Int = 2,
     val recoveryDigit: Int = 4,
@@ -47,10 +71,28 @@ data class UserSettingsEntity(
     val updatedAt: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "analysis_events")
+/**
+ * Record of when a digit analysis condition was met for a market.
+ *
+ * @param id Auto-generated; not used for querying
+ * @param userId Stable user identity
+ */
+@Entity(
+    tableName = "analysis_events",
+    foreignKeys = [
+        ForeignKey(
+            entity = UserProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["userId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("userId")]
+)
 data class AnalysisEventEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "default_trader",
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val userId: String,
     val marketSymbol: String,
     val targetDigit: Int,
     val windowSize: Int,
@@ -63,10 +105,28 @@ data class AnalysisEventEntity(
     val eventTimestamp: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "simulation_sessions")
+/**
+ * A trading session. Sessions are isolated per user.
+ *
+ * @param id Auto-generated
+ * @param userId Stable user identity
+ */
+@Entity(
+    tableName = "simulation_sessions",
+    foreignKeys = [
+        ForeignKey(
+            entity = UserProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["userId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("userId")]
+)
 data class SimulationSessionEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "default_trader",
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val userId: String,
     val initialSimulatedBalance: Double = 0.0,
     val currentSimulatedBalance: Double = 0.0,
     val status: String = "ACTIVE",
@@ -77,9 +137,33 @@ data class SimulationSessionEntity(
     val lossCount: Int = 0
 )
 
-@Entity(tableName = "simulation_positions")
+/**
+ * A settled or pending trade position. Isolated per user and per account.
+ *
+ * @param id Auto-generated
+ * @param userId Stable user identity
+ * @param accountId Deriv account id this trade was placed on
+ */
+@Entity(
+    tableName = "simulation_positions",
+    foreignKeys = [
+        ForeignKey(
+            entity = UserProfileEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["userId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [
+        Index("userId"),
+        Index("accountId"),
+        Index("userId", "accountId")
+    ]
+)
 data class SimulationPositionEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val userId: String,
     val sessionId: Long = 1L,
     val marketSymbol: String,
     val marketName: String,

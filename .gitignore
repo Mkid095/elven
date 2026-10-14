@@ -16,3 +16,9 @@
 local.properties
 .env
 debug.keystore
+
+# Local credentials — never commit
+.mcp.json
+.env
+.env.*
+!.env.example

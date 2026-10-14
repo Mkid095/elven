@@ -60,6 +60,16 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
     private val reqSeq = AtomicInteger(0)
     private val subscriptions = ConcurrentHashMap<String, String>() // symbol -> subscription.id
 
+    /**
+     * Full retained history per market, up to [MAX_TICKS].
+     *
+     * The state exposes only the *windowed* slice, but the full buffer must survive so that
+     * raising the window size later can widen it again. Without this, [handleHistory] would trim
+     * to the window at fetch time and the discarded ticks would be unrecoverable — selecting
+     * "last 1000" after a default 30-tick start would silently yield only 30.
+     */
+    private val fullHistory = ConcurrentHashMap<String, List<TickObservation>>()
+
     private val _marketsState = MutableStateFlow<Map<String, MarketState>>(
         SupportedMarkets.ALL.associate { def ->
             def.symbol to MarketState(
@@ -79,17 +89,22 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
 
     private var currentWindowSize = 30
 
+    /** Maximum ticks retained per market — also the history depth requested on subscribe. */
+    private val MAX_TICKS = 1000
+
     fun start() {
         manualClosed = false
         connectWebSocket()
     }
 
     fun setWindowSize(size: Int) {
-        val bounded = size.coerceIn(1, 1000)
+        val bounded = size.coerceIn(1, MAX_TICKS)
         currentWindowSize = bounded
         _marketsState.update { current ->
-            current.mapValues { (_, state) ->
-                val trimmed = state.ticks.takeLast(bounded)
+            current.mapValues { (symbol, state) ->
+                // Re-slice from the retained full history so the window can grow as well as shrink.
+                val source = fullHistory[symbol] ?: state.ticks
+                val trimmed = source.takeLast(bounded)
                 val freqs = DigitAnalysisEngine.computeFrequencies(trimmed, state.digitFrequencies)
                 state.copy(
                     ticks = trimmed,
@@ -156,7 +171,7 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
         try {
             val req = JSONObject().apply {
                 put("ticks_history", symbol)
-                put("count", 1000)
+                put("count", MAX_TICKS)
                 put("end", "latest")
                 put("style", "ticks")
                 put("subscribe", 1)
@@ -227,9 +242,13 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
             observations.add(DigitAnalysisEngine.createTickObservation(epoch, quote, pipSize))
         }
 
+        // Retain the full fetched history; the state exposes only the windowed slice.
+        val retained = observations.takeLast(MAX_TICKS)
+        fullHistory[symbol] = retained
+
         _marketsState.update { current ->
             val oldState = current[symbol] ?: return@update current
-            val bounded = observations.takeLast(currentWindowSize)
+            val bounded = retained.takeLast(currentWindowSize)
             val freqs = DigitAnalysisEngine.computeFrequencies(bounded, oldState.digitFrequencies)
             val lastObs = bounded.lastOrNull()
             val updated = oldState.copy(
@@ -247,6 +266,7 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
             )
             current + (symbol to updated)
         }
+        refreshOverallConnection()
     }
 
     private fun handleTick(json: JSONObject) {
@@ -263,9 +283,14 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
      * statistical frequencies.
      */
     fun applyNewTick(symbol: String, tick: TickObservation) {
+        // Append to the retained history first, then re-slice the window from it. Appending
+        // straight to state.ticks would lose the ticks outside the current window.
+        val retained = ((fullHistory[symbol] ?: emptyList()) + tick).takeLast(MAX_TICKS)
+        fullHistory[symbol] = retained
+
         _marketsState.update { current ->
             val oldState = current[symbol] ?: return@update current
-            val newTicks = (oldState.ticks + tick).takeLast(currentWindowSize)
+            val newTicks = retained.takeLast(currentWindowSize)
             val freqs = DigitAnalysisEngine.computeFrequencies(newTicks, oldState.digitFrequencies)
             val priceDiff = tick.quote - (oldState.lastQuote ?: tick.quote)
             val updated = oldState.copy(
@@ -284,10 +309,32 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
             )
             current + (symbol to updated)
         }
+        refreshOverallConnection()
+    }
+
+    /**
+     * Derive the aggregate connection badge from the per-market states.
+     *
+     * `_overallConnection` was previously only ever assigned CONNECTING / LOADING_HISTORY /
+     * RECONNECTING / OFFLINE — nothing ever set LIVE, so the home header badge read "Syncing"
+     * forever and the user could not tell whether data was actually streaming.
+     */
+    private fun refreshOverallConnection() {
+        val all = _marketsState.value
+        _overallConnection.value = when {
+            all.isEmpty() -> ConnectionStatus.CONNECTING
+            all.values.any {
+                it.connectionStatus == ConnectionStatus.OFFLINE ||
+                    it.connectionStatus == ConnectionStatus.RECONNECTING
+            } -> ConnectionStatus.RECONNECTING
+            all.values.all { it.connectionStatus == ConnectionStatus.LIVE } -> ConnectionStatus.LIVE
+            else -> ConnectionStatus.LOADING_HISTORY
+        }
     }
 
     fun disconnect() {
         manualClosed = true
+        fullHistory.clear()
         reconnectJob?.cancel()
         reconnectJob = null
         releaseSubscriptions()

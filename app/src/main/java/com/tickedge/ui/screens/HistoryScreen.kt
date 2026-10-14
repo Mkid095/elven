@@ -221,7 +221,7 @@ fun HistoryScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Today", "7 Days", "30 Days").forEach { p ->
+                    listOf("Today", "7 Days", "90 Days").forEach { p ->
                         val isSel = pnlPeriod == p
                         Box(
                             modifier = Modifier
@@ -244,11 +244,20 @@ fun HistoryScreen(
             }
 
             item {
-                val totalTrades = positions.size
-                val winCount = positions.count { it.outcome == "WON" }
-                val totalPnl = positions.sumOf { it.simulatedNetResult }
-                val totalStake = positions.sumOf { it.simulatedStake }
-                val totalReturn = positions.sumOf { it.simulatedPayout }
+                // Period filtering. Previously every chip rendered identical numbers because
+                // this block summed the unfiltered `positions` list.
+                val windowStart = periodStartMillis(pnlPeriod)
+                val inPeriod = positions.filter { it.settledAt >= windowStart }
+
+                // Settlement-poll timeouts are persisted as outcome="PENDING" with a zero net.
+                // Counting them as trades permanently depressed the win rate, so they are
+                // excluded from both the denominator and the numerator.
+                val settled = inPeriod.filter { it.outcome == "WON" || it.outcome == "LOST" }
+                val totalTrades = settled.size
+                val winCount = settled.count { it.outcome == "WON" }
+                val totalPnl = inPeriod.sumOf { it.simulatedNetResult }
+                val totalStake = inPeriod.sumOf { it.simulatedStake }
+                val totalReturn = inPeriod.sumOf { it.simulatedPayout }
                 val winRate = if (totalTrades > 0) ((winCount.toDouble() / totalTrades.toDouble()) * 100).toInt() else 0
 
                 Card(
@@ -360,4 +369,24 @@ fun HistoryScreen(
             }
         }
     }
+}
+
+/**
+ * Start of the P&L window, in epoch millis, for the selected period.
+ *
+ * "Today" is anchored to **local midnight**, not a trailing 24 hours — a rolling window would
+ * count yesterday's afternoon as today and drop this morning. "7 Days" and "90 Days" are
+ * inclusive of today, so they step back 6 and 89 days respectively.
+ */
+private fun periodStartMillis(period: String): Long {
+    val cal = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0)
+        set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0)
+        set(java.util.Calendar.MILLISECOND, 0)
+    }
+    if (period != "Today") {
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -(if (period.startsWith("7")) 6 else 89))
+    }
+    return cal.timeInMillis
 }

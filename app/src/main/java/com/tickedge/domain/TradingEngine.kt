@@ -38,7 +38,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 class TradingEngine(
     private val deriv: DerivClient,
     private val database: AppDatabase,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    /**
+     * Supplies the stable user identity used as the `userId` scope for database writes.
+     *
+     * This is a provider, not a value: the engine is constructed when the ViewModel is created,
+     * which on a cold start is *before* any OAuth session exists. Capturing the id at
+     * construction time would pin every trade to the anonymous fallback and keep writing there
+     * after the user signs in — and would keep the previous user's rows after a sign-out and
+     * sign-in as someone else. Resolving it per write keeps trades with whoever is actually
+     * signed in.
+     */
+    private val userIdProvider: () -> String
 ) {
     private val _simState = MutableStateFlow(SimulatorState.IDLE)
     val simState: StateFlow<SimulatorState> = _simState.asStateFlow()
@@ -58,6 +69,16 @@ class TradingEngine(
 
     private val _dailyLossAccumulated = MutableStateFlow(0.0)
     val dailyLossAccumulated: StateFlow<Double> = _dailyLossAccumulated.asStateFlow()
+
+    /**
+     * Net profit for the current run, used to enforce the take-profit target. Wins add and losses
+     * subtract, so it is a true net figure rather than a gross-loss counter.
+     */
+    private val _sessionProfit = MutableStateFlow(0.0)
+    val sessionProfit: StateFlow<Double> = _sessionProfit.asStateFlow()
+
+    /** Day-of-year on which the loss accumulator was last reset, for midnight rollover. */
+    private val _dailyLossAnchorDay = MutableStateFlow(-1L)
 
     private val _pendingConfirm = MutableStateFlow<NextTradePreview?>(null)
     val pendingConfirmation: StateFlow<NextTradePreview?> = _pendingConfirm.asStateFlow()
@@ -89,6 +110,8 @@ class TradingEngine(
         _simState.value = SimulatorState.SCANNING
         executionJob = scope.launch(Dispatchers.Default) {
             while (isActive && _simState.value != SimulatorState.STOPPED) {
+                rolloverDailyLossIfNeeded()
+
                 // Risk-management stop conditions.
                 val dailyLimitHit = (config.stopTradingOnLimit &&
                     _dailyLossAccumulated.value >= config.maxDailyLoss) ||
@@ -98,9 +121,27 @@ class TradingEngine(
                     break
                 }
 
+                // Take-profit was previously collected in the UI and persisted but never read
+                // here, so a configured profit target could never halt a run.
+                val takeProfitHit = settings.takeProfit > 0.0 &&
+                    _sessionProfit.value >= settings.takeProfit
+                if (takeProfitHit) {
+                    _simState.value = SimulatorState.STOPPED
+                    break
+                }
+
                 val chosenSymbol = selectMarket(config)
                 val isRecovery = streakLossCount > 0 && settings.martingaleEnabled &&
                     streakLossCount <= safety.maxMartingaleSteps()
+
+                // Past the Martingale cap, stop rather than silently reverting to the base stake
+                // while the UI still advertises "IN RECOVERY (STEP n)" and the previous stake is
+                // still unrecovered.
+                if (streakLossCount > safety.maxMartingaleSteps() && settings.martingaleEnabled) {
+                    _simState.value = SimulatorState.STOPPED
+                    break
+                }
+
                 val tradeType = if (isRecovery) TradeType.OVER_UNDER else TradeType.DIFFERS
                 val stake = if (isRecovery) {
                     settings.stakeAmount * Math.pow(2.0, streakLossCount.toDouble())
@@ -108,20 +149,77 @@ class TradingEngine(
                     settings.stakeAmount
                 }
 
+                // Entry condition. Recovery trades must always execute to recover exposure, but a
+                // fresh Differs entry previously fired on a fixed 1.5s cadence regardless of the
+                // digit statistics — the threshold settings were recorded and never consulted.
+                if (!isRecovery && !entryConditionMet(settings, chosenSymbol, getMarketState)) {
+                    _simState.value = SimulatorState.SCANNING
+                    delay(POLL_INTERVAL_MS)
+                    continue
+                }
+
                 val preview = buildPreview(chosenSymbol, settings, tradeType, isRecovery, stake)
                 _nextTrade.value = preview
 
                 val executed = executeRealTrade(settings, config, getMarketState, safety, chosenSymbol, tradeType, stake, preview)
                 if (!executed) {
-                    // A safety gate blocked the order (e.g. real account not armed). Stop cleanly.
+                    // A safety gate blocked the order (e.g. real account not armed), or the
+                    // socket dropped. Previously this only broke the loop, leaving _simState on
+                    // SCANNING — the UI kept showing "Stop Automated Trading" with Start
+                    // unreachable, so the user had to press Stop to clear a loop that had exited.
+                    _simState.value = SimulatorState.STOPPED
                     break
                 }
 
                 // Short intermission so the user sees the outcome before the next trade.
                 delay(1500L)
             }
+            // Normal exit (limit hit, cap reached, gate blocked): never leave the machine in
+            // SCANNING, which the UI reads as "running".
+            if (_simState.value != SimulatorState.TRADE_IN_PROGRESS) {
+                _simState.value = SimulatorState.STOPPED
+            }
         }
     }
+
+    /**
+     * Evaluate the configured digit-frequency entry condition for a market.
+     *
+     * Returns true when the sample is too small to judge — the settings screen exposes a
+     * minimum sample size, and refusing to trade until enough ticks accumulate is the intended
+     * behaviour rather than an error.
+     */
+    private fun entryConditionMet(
+        settings: TradeSettings,
+        symbol: String,
+        getMarketState: (String) -> MarketState?
+    ): Boolean {
+        val state = getMarketState(symbol) ?: return false
+        val freq = state.digitFrequencies.firstOrNull { it.digit == settings.targetDigit }
+            ?: return false
+        return DigitAnalysisEngine.evaluateCondition(
+            observedPercent = freq.percentage,
+            thresholdPercent = settings.thresholdPercent,
+            operator = settings.comparisonOperator,
+            sampleSize = state.sampleSize,
+            minimumSampleSize = MIN_SAMPLE_SIZE
+        )
+    }
+
+    /**
+     * Reset the daily loss accumulator when the calendar day rolls over.
+     *
+     * Without this the counter accumulated forever within a process, so a run spanning midnight
+     * stayed halted on yesterday's losses.
+     */
+    private fun rolloverDailyLossIfNeeded() {
+        if (_dailyLossAnchorDay.value == currentDayOfYear()) return
+        _dailyLossAnchorDay.value = currentDayOfYear()
+        _dailyLossAccumulated.value = 0.0
+    }
+
+    private fun currentDayOfYear(): Long =
+        java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR).toLong()
 
     private fun buildPreview(
         symbol: String,
@@ -302,8 +400,15 @@ class TradingEngine(
 
         val settlement = trading.awaitSettlement(buy.contractId)
         val isWin = settlement.settled && settlement.isWin
+
+        // An unsettled contract has still been paid for: buy_price left the account and will not
+        // come back unless the contract resolves in our favour. Booking it as 0.0 understated both
+        // the P/L ledger and the daily-loss budget, and because `else if (settlement.settled)` also
+        // skipped the loss counter, a settlement-poll timeout silently consumed real money with
+        // every risk control still reporting zero. Treat an unresolved stake as at-risk loss until
+        // proven otherwise; `outcome` still records it as PENDING for the UI.
         val netResult = when {
-            !settlement.settled -> 0.0
+            !settlement.settled -> -buy.buyPrice
             isWin -> settlement.payout - buy.buyPrice
             else -> -buy.buyPrice
         }
@@ -313,15 +418,17 @@ class TradingEngine(
             else -> TradeOutcome.LOST
         }
 
-        // Streak + daily loss tracking.
+        // Streak + loss/profit tracking. Unsettled contracts advance the streak too — the money
+        // is committed even though the outcome is unknown.
         if (isWin) {
             streakLossCount = 0
             _consecutiveLosses.value = 0
-        } else if (settlement.settled) {
+        } else {
             streakLossCount++
             _consecutiveLosses.value = streakLossCount
             if (netResult < 0) _dailyLossAccumulated.update { it + (-netResult) }
         }
+        _sessionProfit.update { it + netResult }
         lastTradedMarketSymbol = symbol
         tradesOnCurrentMarket++
 
@@ -355,6 +462,7 @@ class TradingEngine(
         scope.launch(Dispatchers.IO) {
             database.simulationDao().insertPosition(
                 SimulationPositionEntity(
+                    userId = userIdProvider(),
                     sessionId = 1L,
                     marketSymbol = symbol,
                     marketName = SupportedMarkets.find(symbol).shortName,
@@ -463,3 +571,9 @@ data class NextTradePreview(
     val ifLossNextStake: Double = 0.0,
     val accountLabel: String = ""
 )
+
+/** How often the loop re-evaluates the entry condition while waiting for a signal. */
+private const val POLL_INTERVAL_MS = 1000L
+
+/** Minimum ticks required before the digit-frequency entry condition is trusted. */
+private const val MIN_SAMPLE_SIZE = 10

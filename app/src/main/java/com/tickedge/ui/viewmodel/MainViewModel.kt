@@ -9,6 +9,8 @@ import com.tickedge.BuildConfig
 import com.tickedge.data.deriv.DerivAccount
 import com.tickedge.data.deriv.DerivAccountKind
 import com.tickedge.data.deriv.DerivClient
+import com.tickedge.data.instant.FidscriptSession
+import com.tickedge.data.instant.InstantDbClient
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.AnalysisEventEntity
 import com.tickedge.data.local.UserProfileEntity
@@ -30,17 +32,61 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+/**
+ * Placeholder user id used before anyone is signed in. Also the id the v4->v5 migration
+ * attributes legacy rows to, so anonymous history stays visible after the upgrade.
+ */
+private const val ANONYMOUS_USER_ID = "default_trader"
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val db = AppDatabase.getDatabase(application)
     private val webSocketService = DerivWebSocketService(viewModelScope)
-    private val oauth = DerivOAuthClient(application, viewModelScope)
+    private val oauth = DerivOAuthClient.share(application, viewModelScope)
     private val deriv = DerivClient(BuildConfig.DERIV_APP_ID, { oauth.accessToken() }, viewModelScope)
-    private val tradingEngine = TradingEngine(deriv, db, viewModelScope)
+
+    /**
+     * Stable user identity; derived from the authenticated Deriv user or the legacy default.
+     * Uses [DerivUser.stableKey] (open_id if available, otherwise id) to match the
+     * user identifier stored in SecureTokenStore.
+     */
+    private val currentUserId: String
+        get() = oauth.currentUser()?.stableKey ?: ANONYMOUS_USER_ID
+
+    // Resolve the user per write, not once at construction — see TradingEngine's userIdProvider.
+    private val tradingEngine = TradingEngine(deriv, db, viewModelScope) { currentUserId }
+
+    /**
+     * FIDScript cross-device sync.
+     *
+     * This is additive: Room remains the single source of truth and every write path is local.
+     * The FIDScript session is established from the Deriv ID token and used only to mirror
+     * settings and trade history. Failure here never blocks local use — [syncState] surfaces the
+     * reason and the app carries on.
+     */
+    private val fidscriptSession = FidscriptSession(application)
+    private val fidscript = InstantDbClient(
+        appId = BuildConfig.INSTANT_APP_ID,
+        apiBase = BuildConfig.INSTANT_API_BASE,
+        session = fidscriptSession
+    )
+
+    private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
+    val syncState: StateFlow<SyncState> = _syncState.asStateFlow()
+
+    /** FIDScript cross-device sync status. */
+    sealed interface SyncState {
+        /** No FIDScript session yet (not signed in, or `openid` scope not granted). */
+        data object Idle : SyncState
+        data object Connecting : SyncState
+        data class Ready(val userId: String) : SyncState
+        data class Failed(val reason: String) : SyncState
+    }
 
     // Markets & connection
     val marketsState: StateFlow<Map<String, MarketState>> = webSocketService.marketsState
@@ -58,15 +104,91 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         oauth.startLogin(activity)
     }
 
-    fun handleOAuthRedirect(uri: android.net.Uri): Boolean {
+    /**
+     * Process an OAuth redirect. Suspend so the caller can await the token exchange — the
+     * previous non-suspend version returned before its coroutine ran, so the result was always
+     * `false`. [DerivOAuthRedirectActivity] drives the exchange directly; this is for any other
+     * caller that routes callbacks through the ViewModel.
+     */
+    suspend fun handleOAuthRedirect(uri: android.net.Uri): Boolean {
         val ok = oauth.handleCallback(uri)
-        if (ok) viewModelScope.launch { deriv.loadAccounts() }
+        if (ok) {
+            deriv.loadAccounts()
+            connectFidscript()
+        }
         return ok
+    }
+
+    /**
+     * Establish the FIDScript session from the Deriv ID token, then push the current local
+     * settings so a fresh device has something to read.
+     *
+     * Safe to call repeatedly. A failure is recorded in [syncState] and otherwise ignored —
+     * local Room data and Deriv trading are unaffected.
+     */
+    fun connectFidscript() {
+        viewModelScope.launch {
+            if (_syncState.value is SyncState.Connecting) return@launch
+            _syncState.value = SyncState.Connecting
+
+            val idToken = oauth.idToken()
+            if (idToken.isNullOrBlank()) {
+                _syncState.value = SyncState.Idle
+                return@launch
+            }
+
+            fidscriptSession.signIn(idToken)
+                .onSuccess { session ->
+                    _syncState.value = SyncState.Ready(session.userId)
+                    pushSettingsToCloud()
+                }
+                .onFailure { error ->
+                    _syncState.value =
+                        SyncState.Failed(error.message ?: "FIDScript sign-in failed")
+                }
+        }
+    }
+
+    /**
+     * Mirror the current settings to FIDScript.
+     *
+     * Note the `userId` written is FIDScript's `auth.id` — **not** the Deriv app id. Writing the
+     * wrong value produces a row the user can never read back, because row permissions compare
+     * against the FIDScript identity.
+     */
+    private suspend fun pushSettingsToCloud() {
+        val fidUserId = fidscriptSession.userId() ?: return
+        val settings = _tradeSettings.value
+        val config = _systemConfig.value
+
+        fidscript.upsertUserSettings(
+            userId = fidUserId,
+            fields = mapOf(
+                "targetDigit" to settings.targetDigit,
+                "recoveryDigit" to settings.recoveryDigit,
+                "recoveryDirection" to settings.recoveryDirection,
+                "stakeAmount" to settings.stakeAmount,
+                "takeProfit" to settings.takeProfit,
+                "stopLoss" to settings.stopLoss,
+                "maxDailyLoss" to config.maxDailyLoss,
+                "maxMartingaleSteps" to _maxMartingaleSteps.value,
+                "realArmed" to _realArmed.value,
+                "requirePerOrderConfirm" to _requirePerOrderConfirm.value,
+                "contractType" to "Differs",
+                "updatedAt" to System.currentTimeMillis()
+            )
+        ).onFailure { error ->
+            _syncState.value = SyncState.Failed(error.message ?: "Settings sync failed")
+        }
     }
 
     fun derivLogout() {
         tradingEngine.stopTrading()
         oauth.logout()
+        // Drop the FIDScript session too — its refresh token grants read/write on this user's
+        // rows, so it must not outlive the Deriv sign-in on this device.
+        fidscriptSession.signOut()
+        _syncState.value = SyncState.Idle
         deriv.dispose()
     }
 
@@ -98,8 +220,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Profile (no seed; the balances used by the UI come from deriv.accounts)
     val userProfile: StateFlow<UserProfileEntity> =
-        db.userProfileDao().getProfile().map { it ?: UserProfileEntity() }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UserProfileEntity())
+        authState.flatMapLatest { state ->
+            val uid = (state as? AuthState.Authenticated)?.user?.id ?: ANONYMOUS_USER_ID
+            db.userProfileDao().getProfile(uid).map { it ?: UserProfileEntity(id = uid) }
+        // `id` is the primary key and has no default; the anonymous fallback id is the
+        // only sensible placeholder before an authenticated profile has loaded.
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UserProfileEntity(id = ANONYMOUS_USER_ID))
 
     // Settings
     private val _tradeSettings = MutableStateFlow(TradeSettings())
@@ -125,13 +251,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val dailyLoss = tradingEngine.dailyLossAccumulated
     val pendingConfirmation = tradingEngine.pendingConfirmation
 
-    // Room flows
+    // Room flows (user-scoped via flatMapLatest on authState)
     val pastPositions: StateFlow<List<com.tickedge.data.local.SimulationPositionEntity>> =
-        db.simulationDao().getAllPositions()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        authState.flatMapLatest { state ->
+            val uid = (state as? AuthState.Authenticated)?.user?.id ?: ANONYMOUS_USER_ID
+            db.simulationDao().getPositionsForUser(uid)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val analysisEvents: StateFlow<List<AnalysisEventEntity>> =
-        db.analysisEventDao().getAllEvents()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        authState.flatMapLatest { state ->
+            val uid = (state as? AuthState.Authenticated)?.user?.id ?: ANONYMOUS_USER_ID
+            db.analysisEventDao().getEventsForUser(uid)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Navigation
     private val _currentScreen = MutableStateFlow("home")
@@ -144,13 +274,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         webSocketService.start()
         viewModelScope.launch {
             deriv.loadAccounts()
+            ensureProfile()
             loadPersistedSettings()
         }
+        observeAuthForProfileAndSync()
         observeAnalysisThresholds()
     }
 
+    /**
+     * Guarantee a `profiles` row exists for the signed-in user.
+     *
+     * Every child entity (settings, analysis events, sessions, positions) declares a foreign key
+     * to `profiles.id`, and Room turns foreign keys ON. Without a parent row, an insert throws
+     * SQLiteConstraintException inside a coroutine — which is swallowed, so writes appear to
+     * succeed and the data is simply lost. The migration only seeds the legacy
+     * `default_trader` profile, so this must run for every authenticated user.
+     */
+    private suspend fun ensureProfile() {
+        val userId = currentUserId
+        runCatching {
+            db.userProfileDao().insertOrUpdateProfile(
+                UserProfileEntity(
+                    id = userId,
+                    displayName = oauth.currentUser()?.displayName.orEmpty()
+                )
+            )
+        }.onFailure { error ->
+            android.util.Log.w("MainViewModel", "Could not ensure profile for $userId", error)
+        }
+    }
+
+    /**
+     * When the signed-in identity changes, make sure its profile row exists and open the
+     * FIDScript session. Covers cold start, fresh login, and account switching.
+     */
+    private fun observeAuthForProfileAndSync() {
+        viewModelScope.launch {
+            authState.collect { state ->
+                if (state is AuthState.Authenticated) {
+                    ensureProfile()
+                    loadPersistedSettings()
+                    connectFidscript()
+                }
+            }
+        }
+    }
+
     private suspend fun loadPersistedSettings() {
-        val e = db.userSettingsDao().getSettings().first()
+        val e = db.userSettingsDao().getSettings(currentUserId).first()
         e?.let {
             _tradeSettings.value = toTradeSettings(it)
             _systemConfig.value = toSystemConfig(it)
@@ -205,6 +376,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             db.analysisEventDao().insertEvent(
                 AnalysisEventEntity(
+                    userId = currentUserId,
                     marketSymbol = symbol,
                     targetDigit = targetDigit,
                     windowSize = windowSize,
@@ -226,7 +398,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _activeAccountType.value = type
         viewModelScope.launch {
             deriv.setAccount(type.toDerivKind())
-            db.userProfileDao().updateActiveAccount("default_trader", type.name)
+            db.userProfileDao().updateActiveAccount(currentUserId, type.name)
         }
     }
 
@@ -267,6 +439,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             db.userSettingsDao().saveSettings(
                 UserSettingsEntity(
                     id = 1L,
+                    userId = currentUserId,
                     windowSize = 30,
                     selectedDigit = s.targetDigit,
                     recoveryDigit = s.recoveryDigit,
@@ -296,6 +469,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun navigateTo(screen: String) { _currentScreen.value = screen }
 
     fun startTrading() {
+        // The engine persists positions itself, so its foreign-key parent must exist first.
+        viewModelScope.launch { ensureProfile() }
         tradingEngine.startTrading(
             settings = _tradeSettings.value,
             config = _systemConfig.value,
@@ -315,8 +490,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearHistory() {
         viewModelScope.launch(Dispatchers.IO) {
-            db.simulationDao().clearPositions()
-            db.analysisEventDao().clearEvents()
+            db.simulationDao().clearPositionsForUser(currentUserId)
+            db.analysisEventDao().clearEventsForUser(currentUserId)
             tradingEngine.resetDailyLoss()
         }
     }

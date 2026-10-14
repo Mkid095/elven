@@ -10,7 +10,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -28,17 +27,41 @@ import java.util.concurrent.TimeUnit
  *
  * When [BuildConfig.DERIV_OAUTH_CLIENT_ID] is not configured, the app falls back to the embedded
  * dev PAT so a developer build still works. That fallback is dev-only, not for production.
+ *
+ * ## Lifecycle Safety
+ *
+ * Pending auth state (verifier + state) is persisted to encrypted storage before the browser
+ * is launched. If the process is killed before the callback arrives, [rehydrate] will
+ * recover the pending state. The pending auth is cleared on success, error, cancellation,
+ * or expiry (15 minutes).
+ *
+ * [handleCallback] is **suspend** — the caller MUST await it before treating the callback as
+ * complete. The redirect activity finishes only after the token exchange has been confirmed.
  */
 class DerivOAuthClient(
     context: Context,
     private val scope: CoroutineScope
 ) {
     private val tokenStore = SecureTokenStore(context)
+    private val appContext = context.applicationContext
 
     private val authEndpoint = "https://auth.deriv.com/oauth2/auth"
     private val tokenEndpoint = "https://auth.deriv.com/oauth2/token"
     private val appId = BuildConfig.DERIV_APP_ID
-    private val clientId = BuildConfig.DERIV_OAUTH_CLIENT_ID
+    /**
+     * OAuth client id (Deriv app id registered for the OAuth flow).
+     *
+     * NOTE: this is NOT necessarily [appId]. Deriv treats "client_id" as "the app id of the app
+     * you registered", and this project registers two:
+     *  - `elvenoauth` — the OAuth app, used here as the client_id
+     *  - `elven`      — the trading app, used for the WebSocket + Deriv-App-ID header
+     *
+     * The [appId] fallback below is only correct when a single Deriv app serves both roles.
+     * When they differ, DERIV_OAUTH_CLIENT_ID MUST be set explicitly — otherwise the token
+     * request is sent with the trading app's id and Deriv rejects it.
+     */
+    private val clientId: String
+        get() = BuildConfig.DERIV_OAUTH_CLIENT_ID.takeIf { !isUnset(it) } ?: appId
     private val redirectUri = BuildConfig.DERIV_OAUTH_REDIRECT_URI
     private val scopes = BuildConfig.DERIV_OAUTH_SCOPES
 
@@ -52,6 +75,16 @@ class DerivOAuthClient(
 
         internal fun isUnset(value: String?): Boolean =
             value.isNullOrBlank() || value.equals(UNSET, ignoreCase = true)
+
+        /** Singleton accessor — same instance everywhere. Survives activity recreation. */
+        @Volatile
+        private var INSTANCE: DerivOAuthClient? = null
+
+        fun share(context: Context, scope: CoroutineScope): DerivOAuthClient {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: DerivOAuthClient(context.applicationContext, scope).also { INSTANCE = it }
+            }
+        }
     }
 
     private val http = OkHttpClient.Builder()
@@ -59,16 +92,16 @@ class DerivOAuthClient(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    @Volatile
-    private var pendingVerifier = ""
-    @Volatile
-    private var pendingState = ""
-
     private val _authState = MutableStateFlow(initialAuthState())
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
     private fun initialAuthState(): AuthState =
-        if (hasToken()) AuthState.Authenticated(DerivUser(id = tokenStore.userId().orEmpty(), openId = tokenStore.openId()))
+        if (hasToken()) AuthState.Authenticated(
+            DerivUser(
+                id = tokenStore.stableKey()?.takeIf { it.isNotBlank() } ?: tokenStore.userId().orEmpty(),
+                openId = tokenStore.openId()
+            )
+        )
         else AuthState.Unauthenticated
 
     /** True when a registered OAuth client is configured for this app. */
@@ -84,20 +117,57 @@ class DerivOAuthClient(
         if (hasToken()) tokenStore.accessToken()
         else BuildConfig.DERIV_API_TOKEN.takeIf { !isUnset(it) }
 
+    /**
+     * The OIDC ID token from the last Deriv token exchange.
+     *
+     * Required by FIDScript's `POST /runtime/oauth/id_token` to establish the cross-device
+     * session. Present only when the `openid` scope was granted (DERIV_OAUTH_SCOPES).
+     * Returns null when Deriv did not issue one — FIDScript sync is then unavailable, but
+     * Deriv login and local trading are unaffected.
+     */
+    fun idToken(): String? = tokenStore.idToken()
+
     fun currentUser(): DerivUser? = (authState.value as? AuthState.Authenticated)?.user
 
-    /** Open Deriv's authorization page in the system browser. */
+    /**
+     * True when a login is in progress and a callback is expected.
+     * Recovers across process death via [SecureTokenStore.getPendingAuth].
+     */
+    fun hasPendingAuth(): Boolean = tokenStore.getPendingAuth() != null
+
+    /**
+     * Re-derive the auth state from persisted tokens and pending auth.
+     * Call on app resume to restore state after process death.
+     *
+     * If a pending auth has expired, it is cleared.
+     */
+    fun rehydrate() {
+        // Clear expired pending auth first
+        tokenStore.getPendingAuth()
+        _authState.value = initialAuthState()
+    }
+
+    /**
+     * Open Deriv's authorization page in the system browser.
+     * Pending auth state is persisted to SecureTokenStore so it survives process death.
+     */
     fun startLogin(activity: Activity) {
         if (!isOAuthConfigured()) {
             // Dev fallback: no OAuth registered; use the embedded PAT and mark authenticated.
-            _authState.value = AuthState.Authenticated(DerivUser(id = "dev", displayName = "Developer (PAT fallback)"))
+            // ⚠️  This is NOT safe for production multi-user — every user gets the same dev identity.
+            _authState.value = AuthState.Authenticated(
+                DerivUser(id = "dev", displayName = "Developer (PAT fallback)")
+            )
             return
         }
         val verifier = Pkce.newVerifier()
         val challenge = Pkce.challengeFor(verifier)
         val state = Pkce.newNonce()
-        pendingVerifier = verifier
-        pendingState = state
+        val now = System.currentTimeMillis()
+
+        // Persist BEFORE launching browser — survives process death
+        tokenStore.savePendingAuth(verifier, state, now)
+
         _authState.value = AuthState.Authenticating
 
         val url = Uri.parse(authEndpoint).buildUpon()
@@ -113,68 +183,175 @@ class DerivOAuthClient(
     }
 
     /**
-     * Handle the OAuth redirect (the [data] intent data). Validates state, then exchanges the code.
-     * Returns whether a session was or is being established.
+     * Handle the OAuth redirect. Validates state, then exchanges the code for tokens.
+     *
+     * This is a **suspend** function. The caller MUST await the result before assuming
+     * the callback has been processed. The token exchange is complete when this returns.
+     *
+     * @return true if session establishment has begun (caller can wait); false on
+     *         immediate error (no session was started).
      */
-    fun handleCallback(data: Uri): Boolean {
+    suspend fun handleCallback(data: Uri): Boolean {
         if (!isOAuthConfigured()) return hasToken()
-        val code = data.getQueryParameter("code")
-        val returnedState = data.getQueryParameter("state")
+
+        // Check for OAuth error from Deriv
         val error = data.getQueryParameter("error")
         if (!error.isNullOrBlank()) {
-            _authState.value = AuthState.AuthenticationError(error)
+            val desc = data.getQueryParameter("error_description") ?: error
+            clearPendingAuth()
+            _authState.value = AuthState.AuthenticationError(desc)
             return false
         }
-        if (code.isNullOrBlank() || returnedState != pendingState) {
-            _authState.value = AuthState.AuthenticationError("Invalid or mismatched OAuth callback")
+
+        val code = data.getQueryParameter("code")
+        val returnedState = data.getQueryParameter("state")
+
+        // Recover persisted pending auth (survives process death)
+        val pending = tokenStore.getPendingAuth()
+        when {
+            pending == null -> {
+                _authState.value = AuthState.AuthenticationError("No pending authorization found (session expired or already used)")
+                return false
+            }
+            code.isNullOrBlank() -> {
+                _authState.value = AuthState.AuthenticationError("No authorization code in callback")
+                clearPendingAuth()
+                return false
+            }
+            returnedState != pending.state -> {
+                _authState.value = AuthState.AuthenticationError("Mismatched OAuth state — possible CSRF attack")
+                clearPendingAuth()
+                return false
+            }
+        }
+
+        // Exchange code for tokens (suspend — must complete before activity finishes)
+        val success = exchangeCode(code, pending.verifier)
+        if (!success) {
             return false
         }
-        scope.launch { exchangeCode(code) }
+
+        // Auth is now established; clear pending state
+        clearPendingAuth()
         return true
     }
 
-    private suspend fun exchangeCode(code: String) {
+    /**
+     * Exchange the authorization code for tokens using the PKCE verifier.
+     * Updates [authState] to Authenticated on success, or AuthenticationError on failure.
+     *
+     * @return true if tokens were successfully stored and auth state is now Authenticated
+     */
+    private suspend fun exchangeCode(code: String, verifier: String): Boolean {
         _authState.value = AuthState.Reconnecting
-        withContext(Dispatchers.IO) {
+
+        return withContext(Dispatchers.IO) {
             val form = FormBody.Builder()
                 .add("grant_type", "authorization_code")
                 .add("code", code)
-                .add("code_verifier", pendingVerifier)
+                .add("code_verifier", verifier)
                 .add("client_id", clientId)
                 .add("redirect_uri", redirectUri)
                 .build()
-            val request = Request.Builder().url(tokenEndpoint).post(form).build()
-            http.newCall(request).execute().use { resp ->
-                val json = JSONObject(resp.body?.string().orEmpty())
-                val err = json.optString("error", "")
-                if (resp.code !in 200..299 || err.isNotBlank()) {
-                    _authState.value = AuthState.AuthenticationError("OAuth: ${err.ifBlank { "HTTP ${resp.code}" }}")
-                    return@use
+
+            val request = Request.Builder()
+                .url(tokenEndpoint)
+                .post(form)
+                .build()
+
+            try {
+                http.newCall(request).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    val json = JSONObject(body)
+                    val err = json.optString("error", "")
+                    val errDesc = json.optString("error_description", "")
+
+                    if (resp.code !in 200..299 || err.isNotBlank()) {
+                        val msg = if (errDesc.isNotBlank()) "${err}: ${errDesc}"
+                                   else if (err.isNotBlank()) err
+                                   else "HTTP ${resp.code}"
+                        _authState.value = AuthState.AuthenticationError("Token exchange failed: ${msg}")
+                        return@use false
+                    }
+
+                    val accessToken = json.getString("access_token")
+                    val expiresIn = json.optLong("expires_in", 0L)
+                    val expiresAt = if (expiresIn > 0) System.currentTimeMillis() + expiresIn * 1000L else 0L
+                    val refreshToken = json.optString("refresh_token", "").ifBlank { null }
+
+                    // The OIDC ID token. Present only when the `openid` scope was granted
+                    // (DERIV_OAUTH_SCOPES). This is what FIDScript's /runtime/oauth/id_token
+                    // verifies to establish the cross-device session. Absent is not fatal —
+                    // Deriv login and local trading still work without it.
+                    val idToken = json.optString("id_token", "").ifBlank { null }
+
+                    // Fetch user identity from the OIDC userinfo endpoint.
+                    // Deriv's openid-configuration declares claims_supported: ["sub"], so `sub`
+                    // is the authoritative user identifier. Optionally includes email, name, etc.
+                    val userInfo = fetchUserInfo(accessToken)
+                    if (userInfo == null) {
+                        _authState.value = AuthState.AuthenticationError("Token exchange succeeded but userinfo endpoint returned no identity")
+                        return@use false
+                    }
+
+                    val userId = userInfo.optString("sub", "").ifBlank {
+                        _authState.value = AuthState.AuthenticationError("Token exchange succeeded but userinfo response missing 'sub' claim")
+                        return@use false
+                    }
+                    val email = userInfo.optString("email", "").ifBlank { null }
+                    val name = userInfo.optString("name", "").ifBlank { null }
+                    // openid scope may also return open_id
+                    val openId = userInfo.optString("open_id", "").ifBlank { null }
+
+                    tokenStore.saveTokens(
+                        accessToken = accessToken,
+                        refreshToken = refreshToken,
+                        userId = userId,
+                        openId = openId,
+                        expiresAtEpochMs = expiresAt,
+                        idToken = idToken
+                    )
+
+                    // `id` MUST equal stableKey. Downstream, local writes scope rows by
+                    // DerivUser.stableKey while local reads scope them by DerivUser.id. If those
+                    // two strings ever differ (Deriv returning both `sub` and `open_id`), trades
+                    // are written under one key and queried under another, and history reads back
+                    // permanently empty. Keeping them identical removes the whole class of bug.
+                    val stableKey = openId?.takeIf { it.isNotBlank() } ?: userId
+
+                    _authState.value = AuthState.Authenticated(
+                        DerivUser(id = stableKey, openId = openId, displayName = name ?: email)
+                    )
+                    return@use true
                 }
-                val expiresIn = json.optLong("expires_in", 0L)
-                val expiresAt = if (expiresIn > 0) System.currentTimeMillis() + expiresIn * 1000L else 0L
-                val openId = json.optString("open_id", "").ifBlank { null }
-                val userId = json.optString("id_token_subject", "").ifBlank { json.optString("sub", "") }.ifBlank { openId.orEmpty() }
-                tokenStore.saveTokens(json.getString("access_token"), json.optString("refresh_token", "").ifBlank { null }, userId, openId, expiresAt)
-                pendingVerifier = ""
-                pendingState = ""
-                _authState.value = AuthState.Authenticated(DerivUser(id = userId, openId = openId))
+            } catch (e: Exception) {
+                _authState.value = AuthState.AuthenticationError("Token exchange error: ${e.message}")
+                false
             }
         }
     }
 
-    /** Refresh the access token when it has expired (if Deriv issues refresh tokens). */
+    /**
+     * Refresh the access token when it has expired.
+     * Only supported if Deriv issues refresh tokens in the token response.
+     */
     suspend fun refresh() {
         val rt = tokenStore.refreshToken()
         if (rt.isNullOrBlank() || !isOAuthConfigured()) return
         _authState.value = AuthState.Reconnecting
+
         withContext(Dispatchers.IO) {
             val form = FormBody.Builder()
                 .add("grant_type", "refresh_token")
                 .add("refresh_token", rt)
                 .add("client_id", clientId)
                 .build()
-            val request = Request.Builder().url(tokenEndpoint).post(form).build()
+
+            val request = Request.Builder()
+                .url(tokenEndpoint)
+                .post(form)
+                .build()
+
             try {
                 http.newCall(request).execute().use { resp ->
                     val json = JSONObject(resp.body?.string().orEmpty())
@@ -182,14 +359,20 @@ class DerivOAuthClient(
                         val expiresIn = json.optLong("expires_in", 0L)
                         val expiresAt = if (expiresIn > 0) System.currentTimeMillis() + expiresIn * 1000L else 0L
                         tokenStore.saveTokens(
-                            json.getString("access_token"),
-                            json.optString("refresh_token", rt),
-                            tokenStore.userId(),
-                            tokenStore.openId(),
-                            expiresAt
+                            accessToken = json.getString("access_token"),
+                            refreshToken = json.optString("refresh_token", rt),
+                            userId = tokenStore.userId(),
+                            openId = tokenStore.openId(),
+                            expiresAtEpochMs = expiresAt,
+                            // Prefer a freshly-issued ID token; otherwise keep the existing one
+                            // so the FIDScript session survives an access-token refresh.
+                            idToken = json.optString("id_token", "").ifBlank { tokenStore.idToken() }
                         )
-                        _authState.value = AuthState.Authenticated(DerivUser(id = tokenStore.userId().orEmpty(), openId = tokenStore.openId()))
+                        _authState.value = AuthState.Authenticated(
+                            DerivUser(id = tokenStore.userId().orEmpty(), openId = tokenStore.openId())
+                        )
                     } else {
+                        // Refresh token invalid — clear session
                         tokenStore.clear()
                         _authState.value = AuthState.SessionExpired
                     }
@@ -200,16 +383,39 @@ class DerivOAuthClient(
         }
     }
 
-    /** Clear the local session (sensitive in-memory + encrypted tokens). */
+    /**
+     * Clear the local session. Pending auth is also cleared.
+     * Note: This does NOT revoke the Deriv OAuth token (Deriv may not support revocation).
+     */
     fun logout() {
+        clearPendingAuth()
         tokenStore.clear()
-        pendingVerifier = ""
-        pendingState = ""
         _authState.value = AuthState.Unauthenticated
     }
 
-    /** Re-derive the auth state from the persisted token store (call on app resume). */
-    fun rehydrate() {
-        _authState.value = initialAuthState()
+    /**
+     * Call the OIDC userinfo endpoint to retrieve the authenticated user's identity claims.
+     * @param accessToken The bearer token obtained from the token exchange.
+     * @return A JSONObject of userinfo claims, or null on failure.
+     */
+    private fun fetchUserInfo(accessToken: String): JSONObject? {
+        return try {
+            val request = Request.Builder()
+                .url("https://auth.deriv.com/userinfo")
+                .addHeader("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+            http.newCall(request).execute().use { resp ->
+                if (resp.code in 200..299) {
+                    JSONObject(resp.body?.string().orEmpty())
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun clearPendingAuth() {
+        tokenStore.clearPendingAuth()
     }
 }

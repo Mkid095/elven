@@ -26,12 +26,40 @@
             </intent-filter>
         </activity>
 
-        <!-- Deriv OAuth redirect (custom scheme registered in the Deriv app dashboard) -->
+        <!--
+            Deriv OAuth redirect receiver.
+
+            Primary path: verified Android App Link. Deriv redirects to
+            https://elven.nextmavens.com/oauth/callback; Android verifies the domain via
+            /.well-known/assetlinks.json and opens this activity directly, bypassing the
+            browser entirely.
+
+            Fallback: the custom scheme. If domain verification fails (stale signing
+            fingerprint, app not installed), the browser lands on elven-web's callback.html,
+            which forwards the query string to elven://oauth/callback.
+
+            BOTH filters are required. Removing the scheme filter makes a verification failure
+            unrecoverable — the user is stranded on a web page that cannot reach the app.
+        -->
         <activity
             android:name=".DerivOAuthRedirectActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!-- Primary: verified App Link -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data
+                    android:host="elven.nextmavens.com"
+                    android:pathPrefix="/oauth/callback"
+                    android:scheme="https" />
+            </intent-filter>
+
+            <!-- Fallback: custom scheme, mirrors elven-web/public/oauth/callback.html -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 
@@ -40,7 +68,7 @@
 
                 <data
                     android:host="oauth"
-                    android:pathPrefix="/callback"
+                    android:path="/callback"
                     android:scheme="elven" />
             </intent-filter>
         </activity>
