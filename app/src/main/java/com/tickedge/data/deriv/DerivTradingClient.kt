@@ -117,8 +117,24 @@ class DerivTradingClient(private val wsUrl: String) {
         )
     }
 
-    /** Buy the priced proposal. */
-    suspend fun buy(proposalId: String, askPrice: Double): DerivBuyResult {
+    /**
+     * Buy the priced proposal.
+     *
+     * [permit] is required and has no default on purpose. Placing an order is the only operation
+     * here that moves real money, and the live-trading check lives in TradingEngine — several
+     * layers away from this call. Without a mandatory parameter, a future call site could reach
+     * this function having skipped that gate entirely and the mistake would compile silently.
+     * Requiring a [PlaceOrderPermit] turns "I forgot the safety check" into a compile error.
+     */
+    suspend fun buy(proposalId: String, askPrice: Double, permit: PlaceOrderPermit): DerivBuyResult {
+        // Defence in depth: the engine already gates on this, but re-checking here means the
+        // guarantee does not depend on that one code path staying intact.
+        if (!permit.realMoneyAllowed && askPrice > 0.0) {
+            throw DerivApiException(
+                "refusing to place an order: no order permit supplied. Live trading may be armed, " +
+                    "but this call did not pass through the safety gate."
+            )
+        }
         val p = JSONObject()
         p.put("buy", proposalId)
         p.put("price", askPrice)
@@ -178,3 +194,30 @@ class DerivTradingClient(private val wsUrl: String) {
 
 /** Thrown when Deriv returns an explicit error object for an operation. */
 class DerivApiException(message: String) : Exception(message)
+
+/**
+ * Proof that the caller passed the live-trading safety gate before placing an order.
+ *
+ * Constructed only by [com.tickedge.domain.TradingEngine], and only after the real-account arming
+ * and per-order confirmation checks have passed. There is no public constructor path that skips
+ * them, so holding one is meaningful.
+ */
+@JvmInline
+value class PlaceOrderPermit private constructor(internal val realMoneyAllowed: Boolean) {
+    companion object {
+        /**
+         * Grant a permit for a demo/paper order.
+         *
+         * Safe because no real balance is at stake, so the live-trading arming is irrelevant.
+         */
+        val Paper: PlaceOrderPermit = PlaceOrderPermit(false)
+
+        /**
+         * Grant a permit for a real-money order.
+         *
+         * Only call after verifying the account is real, live trading is armed, and any required
+         * per-order confirmation was granted.
+         */
+        fun RealMoneyApproved(): PlaceOrderPermit = PlaceOrderPermit(true)
+    }
+}

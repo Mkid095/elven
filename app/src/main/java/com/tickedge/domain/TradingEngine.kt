@@ -5,6 +5,7 @@ import com.tickedge.data.deriv.DerivAccountKind
 import com.tickedge.data.deriv.DerivApiException
 import com.tickedge.data.deriv.DerivContractParams
 import com.tickedge.data.deriv.DerivContractType
+import com.tickedge.data.deriv.PlaceOrderPermit
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.SimulationPositionEntity
 import com.tickedge.data.model.DigitSelectionMode
@@ -445,6 +446,10 @@ class TradingEngine(
         _simState.value = SimulatorState.TRADE_IN_PROGRESS
 
         // Safety gate before committing real money.
+        //
+        // The outcome is captured as a permit rather than just being an early return, so the buy
+        // below cannot be reached without having demonstrably passed here.
+        var orderPermit = PlaceOrderPermit.Paper
         if (kind == DerivAccountKind.REAL) {
             if (!safety.isRealArmed()) {
                 _activeTrade.value = null
@@ -466,10 +471,12 @@ class TradingEngine(
                 }
                 _simState.value = SimulatorState.TRADE_IN_PROGRESS
             }
+            // Reached only by falling through every check above.
+            orderPermit = PlaceOrderPermit.RealMoneyApproved()
         }
 
         val buy = try {
-            trading.buy(proposal.id, proposal.askPrice)
+            trading.buy(proposal.id, proposal.askPrice, orderPermit)
         } catch (e: DerivApiException) {
             _activeTrade.value = null
             _simState.value = SimulatorState.STOPPED
