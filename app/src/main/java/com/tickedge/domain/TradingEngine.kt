@@ -148,7 +148,7 @@ class TradingEngine(
         val stake = plan.steps.firstOrNull()?.stake ?: return settings.stakeAmount
         // Guard against a degenerate stake: a plan asking for an absurd amount is a signal the
         // recovery is not viable, not a licence to send it.
-        val ceiling = settings.stakeAmount * Math.pow(2.0, streakLossCount + 1)
+        val ceiling = settings.stakeAmount * Math.pow(2.0, (streakLossCount + 1).toDouble())
         return stake.coerceIn(settings.stakeAmount, ceiling.coerceAtLeast(settings.stakeAmount))
     }
     private var lastTradedMarketSymbol = ""

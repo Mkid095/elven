@@ -142,3 +142,14 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+// Room schema export.
+//
+// Without this, Room cannot write its schema JSON and `MigrationTestHelper` has nothing to compare
+// against — which means a migration can only be validated by installing the app and hoping it
+// starts. That is exactly how a broken v5->v6 migration reached the user as a launch crash.
+// Exporting schemas makes migrations testable on the JVM.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+}

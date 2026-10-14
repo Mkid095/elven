@@ -164,8 +164,8 @@ data class SimulationSessionEntity(
  * row: a cached total can drift from the trades that justify it, and these numbers decide whether
  * the user stops or escalates.
  *
- * [lastTradeNet] is the most recently *settled* trade's net result, and [lastTradeSettledAt] its
- * settlement time, so the UI can show both the amount and how stale it is.
+ * The most recent confirmed trade comes from its own query ([LastTradeRow]) rather than from here,
+ * because it needs the row's market name and outcome alongside the amount.
  */
 data class SessionSummary(
     val sessionId: Long = 0,
@@ -173,11 +173,7 @@ data class SessionSummary(
     val winCount: Int = 0,
     val lossCount: Int = 0,
     val totalRealizedPnl: Double = 0.0,
-    val totalStaked: Double = 0.0,
-    val lastTradeNet: Double? = null,
-    val lastTradeSettledAt: Long? = null,
-    val lastTradeMarket: String? = null,
-    val lastTradeOutcome: String? = null
+    val totalStaked: Double = 0.0
 )
 
 /**

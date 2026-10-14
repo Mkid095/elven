@@ -15,6 +15,7 @@ import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.AnalysisEventEntity
 import com.tickedge.data.local.LastTradeRow
 import com.tickedge.data.local.SessionSummary
+import com.tickedge.data.local.SimulationPositionEntity
 import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.local.UserProfileEntity
 import com.tickedge.data.local.UserSettingsEntity
