@@ -224,7 +224,43 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
         when (msgType) {
             "history" -> handleHistory(json)
             "tick" -> handleTick(json)
+            // Previously every other msg_type fell through the when with no else, so Deriv's
+            // `error` frames were discarded silently. A rejected or throttled subscription then
+            // looked identical to a healthy one: history had already set the market LIVE, and
+            // with no ticks ever arriving the displayed price simply froze, reading as "stale
+            // or simulated data" with nothing to indicate a fault.
+            "error" -> handleError(json)
+            "ping" -> Unit // keepalive; nothing to do
+            else -> Log.d(tag, "Unhandled Deriv msg_type=$msgType")
         }
+    }
+
+    /**
+     * Surface a Deriv error frame instead of dropping it.
+     *
+     * Attributes the failure to a market when the error echoes the originating request, marks
+     * that market OFFLINE so the UI stops presenting its last price as current, and leaves the
+     * others alone. Only the numeric code and message are logged — never request payloads.
+     */
+    private fun handleError(json: JSONObject) {
+        val code = json.optString("code")
+        val message = json.optString("message")
+        val symbol = json.optJSONObject("echo_req")?.optString("ticks_history").orEmpty()
+        Log.w(tag, "Deriv error${if (symbol.isNotEmpty()) " for $symbol" else ""}: code=$code message=$message")
+
+        if (symbol.isEmpty()) {
+            // Connection-level failure: nothing to attribute it to, so surface it globally.
+            markAll(ConnectionStatus.OFFLINE)
+            return
+        }
+        _marketsState.update { current ->
+            val state = current[symbol] ?: return@update current
+            current + (symbol to state.copy(
+                connectionStatus = ConnectionStatus.OFFLINE,
+                lastError = "$code: $message"
+            ))
+        }
+        refreshOverallConnection()
     }
 
     private fun handleHistory(json: JSONObject) {
