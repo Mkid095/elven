@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import com.tickedge.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +74,9 @@ class DerivOAuthClient(
          */
         const val UNSET = "not-configured"
 
+        /** Logcat tag. Every auth failure and success is reported under this tag. */
+        const val TAG = "DerivOAuth"
+
         internal fun isUnset(value: String?): Boolean =
             value.isNullOrBlank() || value.equals(UNSET, ignoreCase = true)
 
@@ -94,6 +98,27 @@ class DerivOAuthClient(
 
     private val _authState = MutableStateFlow(initialAuthState())
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
+
+    /**
+     * Single funnel for every authentication failure.
+     *
+     * Failures must reach logcat. Previously each site set `AuthenticationError` directly, so the
+     * reason existed only in the UI and was invisible in a device log — which made sign-in bugs
+     * undiagnosable without someone reading the screen aloud. Routing them all through here means
+     * `adb logcat -s DerivOAuth` shows the exact reason.
+     *
+     * [cause] is logged as a stack trace where one exists; no token or code is ever logged.
+     */
+    private fun fail(message: String, cause: Throwable? = null) {
+        if (cause != null) Log.w(TAG, message, cause) else Log.w(TAG, message)
+        _authState.value = AuthState.AuthenticationError(message)
+    }
+
+    /** Log a successful sign-in, for symmetry with [fail] when tracing a login. */
+    private fun succeed(user: DerivUser) {
+        Log.i(TAG, "Signed in; stable key resolved (id length=${user.id.length})")
+        _authState.value = AuthState.Authenticated(user)
+    }
 
     private fun initialAuthState(): AuthState =
         if (hasToken()) AuthState.Authenticated(
@@ -155,9 +180,7 @@ class DerivOAuthClient(
         if (!isOAuthConfigured()) {
             // Dev fallback: no OAuth registered; use the embedded PAT and mark authenticated.
             // ⚠️  This is NOT safe for production multi-user — every user gets the same dev identity.
-            _authState.value = AuthState.Authenticated(
-                DerivUser(id = "dev", displayName = "Developer (PAT fallback)")
-            )
+            succeed(DerivUser(id = "dev", displayName = "Developer (PAT fallback)"))
             return
         }
         val verifier = Pkce.newVerifier()
@@ -199,7 +222,7 @@ class DerivOAuthClient(
         if (!error.isNullOrBlank()) {
             val desc = data.getQueryParameter("error_description") ?: error
             clearPendingAuth()
-            _authState.value = AuthState.AuthenticationError(desc)
+            fail(desc)
             return false
         }
 
@@ -210,16 +233,16 @@ class DerivOAuthClient(
         val pending = tokenStore.getPendingAuth()
         when {
             pending == null -> {
-                _authState.value = AuthState.AuthenticationError("No pending authorization found (session expired or already used)")
+                fail("No pending authorization found (session expired or already used)")
                 return false
             }
             code.isNullOrBlank() -> {
-                _authState.value = AuthState.AuthenticationError("No authorization code in callback")
+                fail("No authorization code in callback")
                 clearPendingAuth()
                 return false
             }
             returnedState != pending.state -> {
-                _authState.value = AuthState.AuthenticationError("Mismatched OAuth state — possible CSRF attack")
+                fail("Mismatched OAuth state — possible CSRF attack")
                 clearPendingAuth()
                 return false
             }
@@ -270,7 +293,7 @@ class DerivOAuthClient(
                         val msg = if (errDesc.isNotBlank()) "${err}: ${errDesc}"
                                    else if (err.isNotBlank()) err
                                    else "HTTP ${resp.code}"
-                        _authState.value = AuthState.AuthenticationError("Token exchange failed: ${msg}")
+                        fail("Token exchange failed: ${msg}")
                         return@use false
                     }
 
@@ -290,12 +313,12 @@ class DerivOAuthClient(
                     // is the authoritative user identifier. Optionally includes email, name, etc.
                     val userInfo = fetchUserInfo(accessToken)
                     if (userInfo == null) {
-                        _authState.value = AuthState.AuthenticationError("Token exchange succeeded but userinfo endpoint returned no identity")
+                        fail("Token exchange succeeded but userinfo endpoint returned no identity")
                         return@use false
                     }
 
                     val userId = userInfo.optString("sub", "").ifBlank {
-                        _authState.value = AuthState.AuthenticationError("Token exchange succeeded but userinfo response missing 'sub' claim")
+                        fail("Token exchange succeeded but userinfo response missing 'sub' claim")
                         return@use false
                     }
                     val email = userInfo.optString("email", "").ifBlank { null }
@@ -317,9 +340,10 @@ class DerivOAuthClient(
                             idToken = idToken
                         )
                     } catch (e: Exception) {
-                        _authState.value = AuthState.AuthenticationError(
+                        fail(
                             "Signed in with Deriv, but could not save the session on this " +
-                                "device: ${e.message}"
+                                "device: ${e.message}",
+                            e
                         )
                         return@use false
                     }
@@ -331,13 +355,11 @@ class DerivOAuthClient(
                     // permanently empty. Keeping them identical removes the whole class of bug.
                     val stableKey = openId?.takeIf { it.isNotBlank() } ?: userId
 
-                    _authState.value = AuthState.Authenticated(
-                        DerivUser(id = stableKey, openId = openId, displayName = name ?: email)
-                    )
+                    succeed(DerivUser(id = stableKey, openId = openId, displayName = name ?: email))
                     return@use true
                 }
             } catch (e: Exception) {
-                _authState.value = AuthState.AuthenticationError("Token exchange error: ${e.message}")
+                fail("Token exchange error: ${e.message}", e)
                 false
             }
         }
@@ -380,8 +402,17 @@ class DerivOAuthClient(
                             // so the FIDScript session survives an access-token refresh.
                             idToken = json.optString("id_token", "").ifBlank { tokenStore.idToken() }
                         )
-                        _authState.value = AuthState.Authenticated(
-                            DerivUser(id = tokenStore.userId().orEmpty(), openId = tokenStore.openId())
+                        // MUST use stableKey(), not userId(): the whole data layer is scoped by
+                        // DerivUser.id, and `id` is defined as stableKey everywhere else. Reading
+                        // userId() here made a refresh silently switch the key whenever Deriv
+                        // returns both `sub` and `open_id`, leaving the user staring at empty
+                        // history and settings that had "vanished".
+                        succeed(
+                            DerivUser(
+                                id = tokenStore.stableKey()?.takeIf { it.isNotBlank() }
+                                    ?: tokenStore.userId().orEmpty(),
+                                openId = tokenStore.openId()
+                            )
                         )
                     } else {
                         // Refresh token invalid — clear session
@@ -390,7 +421,7 @@ class DerivOAuthClient(
                     }
                 }
             } catch (e: Exception) {
-                _authState.value = AuthState.AuthenticationError("Refresh failed: ${e.message}")
+                fail("Refresh failed: ${e.message}", e)
             }
         }
     }
