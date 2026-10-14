@@ -8,33 +8,23 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Lightbulb
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -57,8 +47,8 @@ import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.data.model.DigitSelectionMode
 import com.tickedge.data.model.TradeDurationUnit
 import com.tickedge.data.model.TradeSettings
+import com.tickedge.domain.RecoveryCalculator
 import com.tickedge.ui.theme.BorderDark
-import com.tickedge.ui.theme.StatGreen
 import com.tickedge.ui.theme.StatRed
 import com.tickedge.ui.theme.SurfaceDarkCard
 import com.tickedge.ui.theme.TextPrimary
@@ -66,20 +56,25 @@ import com.tickedge.ui.theme.TextSecondary
 import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
-/** Smallest analysis window accepted. Below the minimum-sample size no entry can fire. */
 private const val MIN_ANALYSIS_WINDOW = 1
-
-/** Largest analysis window; matches the retained-history cap in the websocket service. */
 private const val MAX_ANALYSIS_WINDOW = 1000
-
-/**
- * Ticks required before a threshold is considered meaningful.
- *
- * A window shorter than this can never satisfy an entry, because the minimum-sample guard rejects
- * the evaluation first. Kept in step with `MIN_ANALYSIS_SAMPLE` in MainViewModel.
- */
 private const val MIN_ANALYSIS_SAMPLE = 10
 
+/**
+ * Trade configuration, ordered to follow the decision a trader actually makes:
+ *
+ *  1. **Ticks to Analyze** — the sample window. First because it governs every percentage below
+ *     it, and it applies to both strategies.
+ *  2. **Target Number for Differs** — automated or manual digit selection.
+ *  3. **Differs Entry Condition** — above or below a percentage.
+ *  4. **Automated Recovery** — which Over/Under digit to roll back on, with the recovery ladder
+ *     shown up front so its cost is visible before it is incurred.
+ *  5. **Stake & Tick Duration** — defaults 0.35 and 1 tick.
+ *  6. **Risk Management** — take profit and stop loss.
+ *
+ * The whole thing saves as one [TradeSettings] and is persisted per user, so signing out and back
+ * in restores the same configuration rather than resetting to defaults.
+ */
 @Composable
 fun TradeSettingsScreen(
     currentSettings: TradeSettings,
@@ -87,40 +82,50 @@ fun TradeSettingsScreen(
     onSaveSettings: (TradeSettings) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var windowText by remember { mutableStateOf("${currentSettings.analysisWindowSize}") }
     var targetDigit by remember { mutableStateOf(currentSettings.targetDigit) }
-    var recoveryDigit by remember { mutableStateOf(currentSettings.recoveryDigit) }
-    var recoveryDirection by remember { mutableStateOf(currentSettings.recoveryDirection) }
-    var operator by remember { mutableStateOf(currentSettings.comparisonOperator) }
-    var thresholdText by remember { mutableStateOf("${currentSettings.thresholdPercent}") }
-    var analysisMetric by remember { mutableStateOf(currentSettings.analysisMetric) }
     var digitMode by remember { mutableStateOf(currentSettings.digitSelectionMode) }
-    var analysisWindowText by remember { mutableStateOf("${currentSettings.analysisWindowSize}") }
-    var stakeText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stakeAmount)) }
-    var takeProfitText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.takeProfit)) }
-    var stopLossText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stopLoss)) }
+    var operator by remember { mutableStateOf(currentSettings.comparisonOperator) }
+    var thresholdText by remember {
+        mutableStateOf(String.format(Locale.US, "%.1f", currentSettings.thresholdPercent))
+    }
+    var recoveryDirection by remember { mutableStateOf(currentSettings.recoveryDirection) }
+    var recoveryDigit by remember { mutableStateOf(currentSettings.recoveryDigit) }
+    var stakeText by remember {
+        mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stakeAmount))
+    }
     var durationUnit by remember { mutableStateOf(currentSettings.durationUnit) }
     var durationValueText by remember { mutableStateOf("${currentSettings.durationValue}") }
+    var takeProfitText by remember {
+        mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.takeProfit))
+    }
+    var stopLossText by remember {
+        mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stopLoss))
+    }
     var martingale by remember { mutableStateOf(currentSettings.martingaleEnabled) }
 
-    // Parse live numeric values for real-time table calculation
-    val parsedStake = stakeText.toDoubleOrNull() ?: 1.00
+    val parsedWindow = windowText.toIntOrNull()?.coerceIn(MIN_ANALYSIS_WINDOW, MAX_ANALYSIS_WINDOW)
+        ?: currentSettings.analysisWindowSize
+    val parsedThreshold = thresholdText.toDoubleOrNull()?.coerceIn(0.0, 100.0)
+        ?: currentSettings.thresholdPercent
+    val parsedStake = stakeText.toDoubleOrNull()?.coerceAtLeast(0.01) ?: currentSettings.stakeAmount
+    val parsedDuration = durationValueText.toIntOrNull()?.coerceIn(1, 100) ?: currentSettings.durationValue
+    val parsedTakeProfit = takeProfitText.toDoubleOrNull()?.coerceAtLeast(0.0) ?: currentSettings.takeProfit
+    val parsedStopLoss = stopLossText.toDoubleOrNull()?.coerceAtLeast(0.0) ?: currentSettings.stopLoss
+    val isOver = recoveryDirection.equals("OVER", ignoreCase = true)
 
-    val parsedThreshold = thresholdText.toDoubleOrNull() ?: currentSettings.thresholdPercent
-    val parsedWindow = analysisWindowText.toIntOrNull() ?: currentSettings.analysisWindowSize
-
-    // Compute winning digits for recovery
-    val winningDigits = if (recoveryDirection.equals("OVER", ignoreCase = true)) {
-        ((recoveryDigit + 1)..9).toList()
-    } else {
-        (0 until recoveryDigit).toList()
-    }
-    val losingDigits = (0..9).filter { !winningDigits.contains(it) }
-
-    val winningProb = winningDigits.size / 10.0
-    val overUnderPayoutMultiplier = if (winningDigits.isNotEmpty()) {
-        ((1.0 - winningProb) / winningProb * 0.95).coerceIn(0.20, 5.0)
-    } else {
-        0.95
+    // Live preview of what recovery would actually cost at the chosen Over/Under barrier, assuming
+    // two base stakes have already been lost.
+    val recoveryPreview = remember(parsedStake, recoveryDigit, isOver) {
+        runCatching {
+            RecoveryCalculator.plan(
+                baseStake = parsedStake,
+                lossesToRecover = parsedStake * 2,
+                winProbability = RecoveryCalculator.overUnderWinProbability(recoveryDigit, isOver),
+                maxSteps = 3,
+                maxTotalRisk = 100.0
+            )
+        }.getOrNull()
     }
 
     Column(
@@ -128,17 +133,13 @@ fun TradeSettingsScreen(
             .fillMaxSize()
             .background(Color(0xFF0D0E12))
     ) {
-        // Top App Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
-                onClick = onBackClick,
-                modifier = Modifier.testTag("settings_back_button")
-            ) {
+            IconButton(onClick = onBackClick, modifier = Modifier.testTag("settings_back_button")) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Back",
@@ -146,7 +147,7 @@ fun TradeSettingsScreen(
                 )
             }
             Text(
-                text = "Trade Settings Configuration",
+                text = "Trade Settings",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextPrimary
@@ -158,781 +159,158 @@ fun TradeSettingsScreen(
                 .weight(1f)
                 .padding(horizontal = 16.dp),
             contentPadding = PaddingValues(top = 4.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Section 1: Target Number (Digit 0-9) for Differs
+            // 1 — Ticks to Analyze, first because everything below is computed over it. The entry
+            //     condition lives here too so the window and the threshold sit together; the card
+            //     heading names both so the ordering still reads correctly.
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
+                SettingsCard(
+                    "1 · Ticks to Analyze & 3 · Entry Condition",
+                    "Every percentage below is measured over this window, for both Differs and Over/Under."
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "Differs Target Digit",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = VividYellow
-                        )
-                        Text(
-                            text = "Base trade contract wins if exit tick last digit differs from this number.",
-                            fontSize = 11.sp,
-                            color = TextSecondary
-                        )
+                    AnalysisConditionFields(
+                        operator = operator,
+                        onOperatorChange = { operator = it },
+                        thresholdText = thresholdText,
+                        onThresholdTextChange = { thresholdText = it },
+                        thresholdPercent = parsedThreshold,
+                        windowText = windowText,
+                        onWindowTextChange = { windowText = it },
+                        minWindow = MIN_ANALYSIS_WINDOW,
+                        maxWindow = MAX_ANALYSIS_WINDOW,
+                        minSampleSize = MIN_ANALYSIS_SAMPLE
+                    )
+                }
+            }
 
-                        Spacer(modifier = Modifier.height(10.dp))
+            // 2 — Target digit, automated or manual.
+            item {
+                SettingsCard("2 · Target Number for Differs", "The digit the exit tick must NOT match.") {
+                    DigitModeToggle(digitMode) { digitMode = it }
 
+                    Text(
+                        text = if (digitMode == DigitSelectionMode.FIXED) {
+                            "Always trades the digit you select below."
+                        } else {
+                            "A fresh digit is drawn per opportunity and still has to pass the entry " +
+                                "condition above — a draw that fails simply places no trade."
+                        },
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+
+                    if (digitMode == DigitSelectionMode.FIXED) {
+                        DigitGrid(targetDigit) { targetDigit = it }
+                    } else {
+                        InfoBox(
+                            "Automated digits are on. The bot will trade a random market on every " +
+                                "trade and a different digit each time. Manual digit selection is " +
+                                "disabled while this is on."
+                        )
+                    }
+                }
+            }
+
+            // 4 — Automated recovery.
+            item {
+                SettingsCard(
+                    "4 · Automated Recovery",
+                    "When a Differs trade loses, recovery bets Over/Under on this digit to recover."
+                ) {
+                    ToggleRow(
+                        label = "Enable Martingale recovery",
+                        checked = martingale,
+                        onCheckedChange = { martingale = it },
+                        testTag = "martingale_toggle"
+                    )
+
+                    if (martingale) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            DigitSelectionMode.values().forEach { mode ->
-                                val isSelected = digitMode == mode
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(if (isSelected) VividYellow else Color(0xFF232734))
-                                        .clickable { digitMode = mode }
-                                        .padding(vertical = 10.dp)
-                                        .testTag("digit_mode_${mode.symbol}"),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = mode.label,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color(0xFF101216) else TextPrimary
-                                    )
-                                }
+                            listOf("OVER" to "Over", "UNDER" to "Under").forEach { (value, label) ->
+                                Pill(
+                                    label = label,
+                                    selected = recoveryDirection.equals(value, ignoreCase = true),
+                                    modifier = Modifier.weight(1f),
+                                    testTag = "recovery_direction_$value"
+                                ) { recoveryDirection = value }
                             }
                         }
 
-                        Text(
-                            text = if (digitMode == DigitSelectionMode.FIXED) {
-                                "Always trades the digit you pick below."
-                            } else {
-                                "Draws a fresh digit per market opportunity. A drawn digit is still " +
-                                    "tested against your threshold — if it does not qualify, no trade " +
-                                    "is placed. Randomising widens which digits get considered, it " +
-                                    "does not bypass the entry condition."
-                            },
-                            fontSize = 11.sp,
-                            color = TextSecondary
+                        DigitGrid(recoveryDigit) { recoveryDigit = it }
+
+                        RecoveryPlanPreview(
+                            recoveryPreview = recoveryPreview,
+                            barrier = recoveryDigit,
+                            isOver = isOver
                         )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            (0..9).forEach { d ->
-                                val isSelected = targetDigit == d
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(42.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) VividYellow else Color(0xFF232734))
-                                        .clickable { targetDigit = d },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "$d",
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) Color(0xFF101216) else TextPrimary
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
             }
 
-            // Section 2: Entry Condition (Above / Below & Threshold %) with Clear Explanation
+            // 5 — Stake and contract duration.
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                SettingsCard("5 · Stake & Tick Duration", "Amount per trade and how long each contract runs.") {
+                    NumberField(
+                        value = stakeText,
+                        onValueChange = { stakeText = it },
+                        label = "Stake Amount",
+                        suffix = "$",
+                        decimal = true,
+                        testTag = "stake_input"
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "Entry Condition (Above / Below)",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = VividYellow
-                        )
-
-                        // Condition selector pills
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            listOf(
-                                ComparisonOperator.GREATER_THAN to "Enter Above (>)",
-                                ComparisonOperator.LESS_THAN to "Enter Below (<)"
-                            ).forEach { (op, label) ->
-                                val isSel = operator == op
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(if (isSel) VividYellow else Color(0xFF232734))
-                                        .clickable { operator = op }
-                                        .padding(vertical = 10.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = label,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSel) Color(0xFF101216) else TextPrimary
-                                    )
-                                }
-                            }
-                        }
-
-                        // Custom Threshold Percentage Text Field
-                        OutlinedTextField(
-                            value = thresholdText,
-                            onValueChange = { thresholdText = it },
-                            label = { Text("Threshold Percentage (%)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            trailingIcon = { Text("%", color = VividYellow, fontWeight = FontWeight.Bold, modifier = Modifier.padding(end = 12.dp)) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = VividYellow,
-                                unfocusedBorderColor = BorderDark,
-                                focusedLabelColor = VividYellow,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedContainerColor = Color(0xFF13151D),
-                                unfocusedContainerColor = Color(0xFF13151D)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("custom_threshold_input")
-                        )
-
-                        AnalysisConditionFields(
-                            targetDigit = targetDigit,
-                            metric = analysisMetric,
-                            onMetricChange = { analysisMetric = it },
-                            operator = operator,
-                            thresholdPercent = parsedThreshold,
-                            windowText = analysisWindowText,
-                            onWindowTextChange = { analysisWindowText = it },
-                            minWindow = MIN_ANALYSIS_WINDOW,
-                            maxWindow = MAX_ANALYSIS_WINDOW,
-                            minSampleSize = MIN_ANALYSIS_SAMPLE
-                        )
-
-                        // Explanatory Banner: WHY we have Target Digit and Threshold Above/Below
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF171A24), RoundedCornerShape(10.dp))
-                                .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
-                                .padding(12.dp)
-                        ) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Lightbulb,
-                                    contentDescription = "Why this condition",
-                                    tint = VividYellow,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Column {
-                                    Text(
-                                        text = "Why do we set this condition?",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = VividYellow
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "We monitor Digit $targetDigit. When its empirical frequency in the rolling tick window shifts ${if (operator == ComparisonOperator.GREATER_THAN) "ABOVE" else "BELOW"} $thresholdText%, it indicates a statistical imbalance. The bot executes contracts anticipating mean reversion or continuation.",
-                                        fontSize = 11.sp,
-                                        lineHeight = 16.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
+                        TradeDurationUnit.values().forEach { unit ->
+                            Pill(
+                                label = unit.label,
+                                selected = durationUnit == unit,
+                                modifier = Modifier.weight(1f),
+                                testTag = "duration_unit_${unit.label}"
+                            ) { durationUnit = unit }
                         }
                     }
+                    NumberField(
+                        value = durationValueText,
+                        onValueChange = { durationValueText = it },
+                        label = "Contract Duration",
+                        suffix = durationUnit.shortLabel,
+                        decimal = false,
+                        testTag = "duration_input"
+                    )
                 }
             }
 
-            // Section 3: Trade Duration (Custom entry in Ticks, Seconds, Minutes)
+            // 6 — Risk management.
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Text(
-                            text = "Trade Duration",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = VividYellow
-                        )
-                        Text(
-                            text = "1 tick is calibrated to 2 seconds",
-                            fontSize = 11.sp,
-                            color = StatGreen
-                        )
-
-                        // Unit Selector (Ticks, Seconds, Minutes)
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            TradeDurationUnit.values().forEach { unit ->
-                                val isSel = durationUnit == unit
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSel) VividYellow else Color(0xFF232734))
-                                        .clickable { durationUnit = unit }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = unit.label,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSel) Color(0xFF101216) else TextPrimary
-                                    )
-                                }
-                            }
-                        }
-
-                        // Custom Duration Numeric Text Field
-                        OutlinedTextField(
-                            value = durationValueText,
-                            onValueChange = { durationValueText = it },
-                            label = { Text("Custom Duration (${durationUnit.label})") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            trailingIcon = { Text(durationUnit.shortLabel, color = TextSecondary, modifier = Modifier.padding(end = 12.dp)) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = VividYellow,
-                                unfocusedBorderColor = BorderDark,
-                                focusedLabelColor = VividYellow,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedContainerColor = Color(0xFF13151D),
-                                unfocusedContainerColor = Color(0xFF13151D)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("custom_duration_input")
-                        )
-                    }
+                SettingsCard("6 · Risk Management", "Session limits. Trading stops automatically when reached.") {
+                    NumberField(
+                        value = takeProfitText,
+                        onValueChange = { takeProfitText = it },
+                        label = "Take Profit",
+                        suffix = "$",
+                        decimal = true,
+                        testTag = "take_profit_input"
+                    )
+                    NumberField(
+                        value = stopLossText,
+                        onValueChange = { stopLossText = it },
+                        label = "Stop Loss",
+                        suffix = "$",
+                        decimal = true,
+                        testTag = "stop_loss_input"
+                    )
                 }
             }
 
-            // Section 4: Custom Stake, Take Profit, and Stop Loss
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Text(
-                            text = "Stake & Risk Management",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = VividYellow
-                        )
-
-                        // Custom Stake Amount
-                        OutlinedTextField(
-                            value = stakeText,
-                            onValueChange = { stakeText = it },
-                            label = { Text("Custom Stake Amount ($)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            leadingIcon = { Text("$", color = VividYellow, fontWeight = FontWeight.Bold) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = VividYellow,
-                                unfocusedBorderColor = BorderDark,
-                                focusedLabelColor = VividYellow,
-                                focusedTextColor = TextPrimary,
-                                unfocusedTextColor = TextPrimary,
-                                focusedContainerColor = Color(0xFF13151D),
-                                unfocusedContainerColor = Color(0xFF13151D)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.fillMaxWidth().testTag("custom_stake_input")
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            // Custom Take Profit
-                            OutlinedTextField(
-                                value = takeProfitText,
-                                onValueChange = { takeProfitText = it },
-                                label = { Text("Take Profit ($)") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                leadingIcon = { Text("$", color = StatGreen, fontWeight = FontWeight.Bold) },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = StatGreen,
-                                    unfocusedBorderColor = BorderDark,
-                                    focusedLabelColor = StatGreen,
-                                    focusedTextColor = TextPrimary,
-                                    unfocusedTextColor = TextPrimary,
-                                    focusedContainerColor = Color(0xFF13151D),
-                                    unfocusedContainerColor = Color(0xFF13151D)
-                                ),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.weight(1f).testTag("custom_tp_input")
-                            )
-
-                            // Custom Stop Loss
-                            OutlinedTextField(
-                                value = stopLossText,
-                                onValueChange = { stopLossText = it },
-                                label = { Text("Stop Loss ($)") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                leadingIcon = { Text("$", color = StatRed, fontWeight = FontWeight.Bold) },
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = StatRed,
-                                    unfocusedBorderColor = BorderDark,
-                                    focusedLabelColor = StatRed,
-                                    focusedTextColor = TextPrimary,
-                                    unfocusedTextColor = TextPrimary,
-                                    focusedContainerColor = Color(0xFF13151D),
-                                    unfocusedContainerColor = Color(0xFF13151D)
-                                ),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.weight(1f).testTag("custom_sl_input")
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Section 5: Martingale Recovery Toggle
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Martingale Recovery System",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "When active, any loss on Differs automatically switches to Over & Under recovery with double stake to restore capital.",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                            Switch(
-                                checked = martingale,
-                                onCheckedChange = { martingale = it },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color(0xFF101216),
-                                    checkedTrackColor = VividYellow
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Section 6: AUTOMATED RECOVERY SETUP (OVER & UNDER DIGIT AND DIRECTION)
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (martingale) VividYellow else BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Automated Recovery Setup (Over & Under)",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = VividYellow
-                            )
-                            Box(
-                                modifier = Modifier
-                                    .background(Color(0xFF26200A), RoundedCornerShape(6.dp))
-                                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (martingale) "ACTIVE" else "STANDBY",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (martingale) VividYellow else TextSecondary
-                                )
-                            }
-                        }
-
-                        Text(
-                            text = "Configure the exact contract used to recover previous Differs losses. Choose whether you enter with OVER or UNDER, and set the target recovery digit.",
-                            fontSize = 11.sp,
-                            color = TextSecondary
-                        )
-
-                        // Over / Under Direction Selector
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "Recovery Entry Direction:",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                listOf("OVER", "UNDER").forEach { dir ->
-                                    val isSel = recoveryDirection.equals(dir, ignoreCase = true)
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isSel) VividYellow else Color(0xFF232734))
-                                            .clickable { recoveryDirection = dir }
-                                            .padding(vertical = 10.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = if (dir == "OVER") "Enter OVER (>)" else "Enter UNDER (<)",
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSel) Color(0xFF101216) else TextPrimary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Target Number for Over & Under (Digit 0-9)
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "Recovery Target Number ($recoveryDirection $recoveryDigit):",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                (0..9).forEach { d ->
-                                    val isSelected = recoveryDigit == d
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(42.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(if (isSelected) VividYellow else Color(0xFF232734))
-                                            .clickable { recoveryDigit = d },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "$d",
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isSelected) Color(0xFF101216) else TextPrimary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Why switch to Over & Under explanation box
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF151922), RoundedCornerShape(10.dp))
-                                .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
-                                .padding(12.dp)
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Shield,
-                                        contentDescription = null,
-                                        tint = VividYellow,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Text(
-                                        text = "Why automated switching to Over & Under?",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = VividYellow
-                                    )
-                                }
-                                Text(
-                                    text = "Differs contracts pay a conservative ~10% profit ($0.10 on $1). If a rare Differs loss occurs, recovering through Differs alone requires 10 consecutive wins. TickEdge automatically pivots to $recoveryDirection $recoveryDigit with high ~${String.format(Locale.US, "%.0f", overUnderPayoutMultiplier * 100)}% payout so a single winning recovery trade instantly restores all previous losses and returns you to base Differs.",
-                                    fontSize = 11.sp,
-                                    lineHeight = 16.sp,
-                                    color = TextSecondary
-                                )
-                            }
-                        }
-
-                        // Winning & Losing Digits Breakdown with exact Dollar amounts
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                text = "Winning Digits & Payout Distribution:",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-
-                            // Winning numbers pill row
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF0F2618), RoundedCornerShape(8.dp))
-                                    .border(1.dp, StatGreen, RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text(
-                                        text = "WINNING NUMBERS: ${winningDigits.joinToString(", ")}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = StatGreen
-                                    )
-                                    Text(
-                                        text = "${winningDigits.size} digits (${String.format(Locale.US, "%.1f", winningProb * 100)}% win rate)",
-                                        fontSize = 11.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                                val recoveryStakeExample = parsedStake * 2.0
-                                val winPayoutExample = recoveryStakeExample * (1.0 + overUnderPayoutMultiplier)
-                                Column(horizontalAlignment = Alignment.End) {
-                                    Text(
-                                        text = "Payout: $${String.format(Locale.US, "%.2f", winPayoutExample)}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = StatGreen
-                                    )
-                                    Text(
-                                        text = "Net: +$${String.format(Locale.US, "%.2f", winPayoutExample - recoveryStakeExample)}",
-                                        fontSize = 10.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
-
-                            // Losing numbers pill row
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color(0xFF281316), RoundedCornerShape(8.dp))
-                                    .border(1.dp, StatRed, RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text(
-                                        text = "LOSING NUMBERS: ${losingDigits.joinToString(", ")}",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = StatRed
-                                    )
-                                    Text(
-                                        text = "${losingDigits.size} digits (${String.format(Locale.US, "%.1f", (1.0 - winningProb) * 100)}% loss rate)",
-                                        fontSize = 11.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                                Text(
-                                    text = "Triggers Next Step",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = StatRed
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Section 7: RECOVERY & RISK TABLE (MARTINGALE PROGRESSION SCHEDULE)
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Martingale Recovery & Risk Table",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = VividYellow
-                            )
-                            Icon(
-                                imageVector = Icons.Default.TrendingUp,
-                                contentDescription = null,
-                                tint = VividYellow,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-
-                        Text(
-                            text = "Live progression schedule based on current stake ($${String.format(Locale.US, "%.2f", parsedStake)}) and recovery setting ($recoveryDirection $recoveryDigit):",
-                            fontSize = 11.sp,
-                            color = TextSecondary
-                        )
-
-                        Spacer(modifier = Modifier.height(2.dp))
-
-                        // Step 1: Base Differs
-                        RecoveryRiskRow(
-                            stepNumber = 1,
-                            contractType = "Base Differs (≠ $targetDigit)",
-                            stake = parsedStake,
-                            cumulativeRisk = parsedStake,
-                            ifWinText = "Win Payout $${String.format(Locale.US, "%.2f", parsedStake * 1.10)} (Net +$${String.format(Locale.US, "%.2f", parsedStake * 0.10)}) • Stays Base Differs",
-                            ifLossText = "Loss: Next stake $${String.format(Locale.US, "%.2f", parsedStake * 2.0)} • Switches to $recoveryDirection $recoveryDigit Recovery",
-                            isBase = true
-                        )
-
-                        // Step 2: Recovery 1
-                        val s2Stake = parsedStake * 2.0
-                        val s2CumRisk = parsedStake + s2Stake
-                        val s2Return = s2Stake * (1.0 + overUnderPayoutMultiplier)
-                        val s2Net = s2Return - s2CumRisk
-                        RecoveryRiskRow(
-                            stepNumber = 2,
-                            contractType = "Recovery 1 ($recoveryDirection $recoveryDigit)",
-                            stake = s2Stake,
-                            cumulativeRisk = s2CumRisk,
-                            ifWinText = "Win Return $${String.format(Locale.US, "%.2f", s2Return)} (Net +$${String.format(Locale.US, "%.2f", s2Net)}) • Full Recovery! Rolls back to Differs",
-                            ifLossText = "Loss: Next stake $${String.format(Locale.US, "%.2f", s2Stake * 2.0)} • Advances to Step 3",
-                            isBase = false
-                        )
-
-                        // Step 3: Recovery 2
-                        val s3Stake = parsedStake * 4.0
-                        val s3CumRisk = s2CumRisk + s3Stake
-                        val s3Return = s3Stake * (1.0 + overUnderPayoutMultiplier)
-                        val s3Net = s3Return - s3CumRisk
-                        RecoveryRiskRow(
-                            stepNumber = 3,
-                            contractType = "Recovery 2 ($recoveryDirection $recoveryDigit)",
-                            stake = s3Stake,
-                            cumulativeRisk = s3CumRisk,
-                            ifWinText = "Win Return $${String.format(Locale.US, "%.2f", s3Return)} (Net +$${String.format(Locale.US, "%.2f", s3Net)}) • Full Recovery! Rolls back to Differs",
-                            ifLossText = "Loss: Next stake $${String.format(Locale.US, "%.2f", s3Stake * 2.0)} • Advances to Step 4",
-                            isBase = false
-                        )
-
-                        // Step 4: Recovery 3
-                        val s4Stake = parsedStake * 8.0
-                        val s4CumRisk = s3CumRisk + s4Stake
-                        val s4Return = s4Stake * (1.0 + overUnderPayoutMultiplier)
-                        val s4Net = s4Return - s4CumRisk
-                        RecoveryRiskRow(
-                            stepNumber = 4,
-                            contractType = "Recovery 3 ($recoveryDirection $recoveryDigit)",
-                            stake = s4Stake,
-                            cumulativeRisk = s4CumRisk,
-                            ifWinText = "Win Return $${String.format(Locale.US, "%.2f", s4Return)} (Net +$${String.format(Locale.US, "%.2f", s4Net)}) • Full Recovery! Rolls back to Differs",
-                            ifLossText = "Loss: Next stake $${String.format(Locale.US, "%.2f", s4Stake * 2.0)} • Advances to Step 5",
-                            isBase = false
-                        )
-
-                        // Step 5: Recovery 4
-                        val s5Stake = parsedStake * 16.0
-                        val s5CumRisk = s4CumRisk + s5Stake
-                        val s5Return = s5Stake * (1.0 + overUnderPayoutMultiplier)
-                        val s5Net = s5Return - s5CumRisk
-                        RecoveryRiskRow(
-                            stepNumber = 5,
-                            contractType = "Recovery 4 ($recoveryDirection $recoveryDigit)",
-                            stake = s5Stake,
-                            cumulativeRisk = s5CumRisk,
-                            ifWinText = "Win Return $${String.format(Locale.US, "%.2f", s5Return)} (Net +$${String.format(Locale.US, "%.2f", s5Net)}) • Full Recovery! Rolls back to Differs",
-                            ifLossText = "Loss: Max recovery cap or Stop Loss protection ($${stopLossText})",
-                            isBase = false
-                        )
-                    }
-                }
-            }
-        }
-
-        // Bottom Save Button Bar
-        Surface(
-            color = Color(0xFF12141C),
-            border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Box(modifier = Modifier.padding(16.dp)) {
                 Button(
                     onClick = {
-                        val parsedStakeVal = stakeText.toDoubleOrNull() ?: currentSettings.stakeAmount
-                        val parsedTP = takeProfitText.toDoubleOrNull() ?: currentSettings.takeProfit
-                        val parsedSL = stopLossText.toDoubleOrNull() ?: currentSettings.stopLoss
-                        val parsedDuration = durationValueText.toIntOrNull() ?: currentSettings.durationValue
-
                         onSaveSettings(
                             TradeSettings(
                                 targetDigit = targetDigit,
@@ -940,15 +318,15 @@ fun TradeSettingsScreen(
                                 recoveryDirection = recoveryDirection,
                                 comparisonOperator = operator,
                                 thresholdPercent = parsedThreshold,
-                                analysisMetric = analysisMetric,
+                                // Always Differs. The app trades nothing else, so exposing a
+                                // choice here would only let it be configured wrongly. The field
+                                // stays in the model so migrated databases keep validating.
+                                analysisMetric = AnalysisMetric.DIFFERS_PERCENT,
                                 digitSelectionMode = digitMode,
-                                analysisWindowSize = parsedWindow.coerceIn(
-                                    MIN_ANALYSIS_WINDOW,
-                                    MAX_ANALYSIS_WINDOW
-                                ),
-                                stakeAmount = parsedStakeVal,
-                                takeProfit = parsedTP,
-                                stopLoss = parsedSL,
+                                analysisWindowSize = parsedWindow,
+                                stakeAmount = parsedStake,
+                                takeProfit = parsedTakeProfit,
+                                stopLoss = parsedStopLoss,
                                 durationUnit = durationUnit,
                                 durationValue = parsedDuration,
                                 martingaleEnabled = martingale
@@ -956,23 +334,295 @@ fun TradeSettingsScreen(
                         )
                         onBackClick()
                     },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = VividYellow,
-                        contentColor = Color(0xFF101216)
-                    ),
-                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = VividYellow),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp)
-                        .testTag("save_trade_settings_button")
+                        .testTag("save_settings_button")
                 ) {
-                    Text(
-                        text = "Save Trade Settings",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Text("Save Settings", color = Color(0xFF101216), fontWeight = FontWeight.Bold)
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------- shared pieces
+
+@Composable
+private fun SettingsCard(
+    title: String,
+    subtitle: String,
+    content: @Composable () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(text = title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = VividYellow)
+            Text(text = subtitle, fontSize = 11.sp, color = TextSecondary)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun InfoBox(text: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF171A24), RoundedCornerShape(10.dp))
+            .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
+            .padding(12.dp)
+    ) {
+        Text(text = text, fontSize = 11.sp, color = TextSecondary)
+    }
+}
+
+@Composable
+private fun DigitGrid(selected: Int, onSelect: (Int) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        (0..9).forEach { d ->
+            val isSelected = selected == d
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isSelected) VividYellow else Color(0xFF232734))
+                    .clickable { onSelect(d) }
+                    .testTag("digit_$d"),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "$d",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isSelected) Color(0xFF101216) else TextPrimary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DigitModeToggle(mode: DigitSelectionMode, onChange: (DigitSelectionMode) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        DigitSelectionMode.values().forEach { option ->
+            Pill(
+                label = option.label,
+                selected = mode == option,
+                modifier = Modifier.weight(1f),
+                testTag = "digit_mode_${option.symbol}"
+            ) { onChange(option) }
+        }
+    }
+}
+
+@Composable
+private fun Pill(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) VividYellow else Color(0xFF232734))
+            .clickable { onClick() }
+            .padding(vertical = 10.dp)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (selected) Color(0xFF101216) else TextPrimary
+        )
+    }
+}
+
+@Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = label, fontSize = 13.sp, color = TextPrimary)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color(0xFF101216),
+                checkedTrackColor = VividYellow,
+                uncheckedThumbColor = TextSecondary,
+                uncheckedTrackColor = Color(0xFF232734)
+            ),
+            modifier = Modifier.testTag(testTag)
+        )
+    }
+}
+
+@Composable
+private fun NumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    suffix: String,
+    decimal: Boolean,
+    testTag: String
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { input ->
+            onValueChange(
+                if (decimal) {
+                    input.filter { it.isDigit() || it == '.' }.let { text ->
+                        val dot = text.indexOf('.')
+                        if (dot == -1) text
+                        else text.substring(0, dot + 1) + text.substring(dot + 1).replace(".", "")
+                    }.take(10)
+                } else {
+                    input.filter { it.isDigit() }.take(4)
+                }
+            )
+        },
+        label = { Text(label) },
+        keyboardOptions = KeyboardOptions(
+            keyboardType = if (decimal) KeyboardType.Decimal else KeyboardType.Number
+        ),
+        trailingIcon = {
+            Text(
+                text = suffix,
+                color = VividYellow,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(end = 12.dp)
+            )
+        },
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = VividYellow,
+            unfocusedBorderColor = BorderDark,
+            focusedLabelColor = VividYellow,
+            focusedTextColor = TextPrimary,
+            unfocusedTextColor = TextPrimary,
+            focusedContainerColor = Color(0xFF13151D),
+            unfocusedContainerColor = Color(0xFF13151D)
+        ),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth().testTag(testTag)
+    )
+}
+
+/**
+ * Live preview of the recovery ladder for the chosen Over/Under barrier.
+ *
+ * Shown before any loss happens, because the cost of recovering is invisible until you are already
+ * down. Each row reports the *cumulative exposure*, not just the next stake — the exposure is the
+ * number that actually decides whether continuing is survivable.
+ */
+@Composable
+private fun RecoveryPlanPreview(
+    recoveryPreview: RecoveryCalculator.Plan?,
+    barrier: Int,
+    isOver: Boolean
+) {
+    if (recoveryPreview == null) {
+        Text(
+            text = "Recovery ladder unavailable for this configuration.",
+            fontSize = 11.sp,
+            color = StatRed
+        )
+        return
+    }
+
+    val winProbability = RecoveryCalculator.overUnderWinProbability(barrier, isOver)
+    val winningDigits = if (isOver) (barrier + 1).coerceAtMost(9) else barrier.coerceAtLeast(0)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF171A24), RoundedCornerShape(10.dp))
+            .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
+            .padding(12.dp)
+            .testTag("recovery_plan_preview")
+    ) {
+        Text(
+            text = "Recovery ladder",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary
+        )
+        Text(
+            text = "${if (isOver) "Over" else "Under"} $barrier wins on $winningDigits of 10 digits " +
+                "— ${String.format(Locale.US, "%.0f", winProbability * 100)}% chance, paying " +
+                "${String.format(Locale.US, "%.3f", recoveryPreview.payoutRatio)} per unit staked.",
+            fontSize = 11.sp,
+            color = TextSecondary
+        )
+
+        Box(modifier = Modifier.padding(top = 6.dp))
+
+        recoveryPreview.steps.forEach { step ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(text = "Step ${step.step}", fontSize = 11.sp, color = TextSecondary)
+                Text(
+                    text = String.format(Locale.US, "stake %.2f", step.stake),
+                    fontSize = 11.sp,
+                    color = TextPrimary
+                )
+                Text(
+                    text = String.format(Locale.US, "exposure %.2f", step.cumulativeRisk),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (step.cumulativeRisk > 50.0) StatRed else VividYellow
+                )
+            }
+            Box(modifier = Modifier.padding(top = 4.dp))
+        }
+
+        if (!recoveryPreview.isFeasible) {
+            WarningCard(
+                testTag = "recovery_infeasible_warning",
+                title = "Recovery is not achievable within the limit",
+                body = recoveryPreview.infeasibleReason
+                    ?: "The ladder exceeds the configured risk ceiling.",
+                tint = StatRed,
+                background = Color(0xFF241016),
+                borderColor = Color(0xFF6B2F3A)
+            )
+            Box(modifier = Modifier.padding(top = 6.dp))
+        }
+
+        Text(
+            text = "Estimate only, assuming two base stakes already lost. Each rung is a separate " +
+                "bet with a negative expected value — recovering past losses costs more than it " +
+                "returns, and a losing streak ends the run.",
+            fontSize = 10.sp,
+            color = TextSecondary.copy(alpha = 0.75f)
+        )
     }
 }

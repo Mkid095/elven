@@ -28,7 +28,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.TextPrimary
@@ -37,30 +36,31 @@ import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
 /**
- * Ordinary level of each metric on live Deriv synthetic ticks.
+ * Ordinary level of Differs % on live Deriv synthetic ticks.
  *
- * Ten last digits on a roughly uniform stream give P(equals) ~10% and P(differs) ~90%. These are
- * what a "filter" has to beat; a threshold at or below the baseline describes the market's normal
- * behaviour rather than selecting a moment.
+ * Ten last digits on a roughly uniform stream give P(last digit != d) ~90%. A threshold at or below
+ * that describes the market's normal behaviour rather than selecting a moment, which is what the
+ * warning below is for.
  */
 private const val DIFFERS_BASELINE = 90.0
-private const val EQUALS_BASELINE = 10.0
 
 /**
- * Controls deciding *what* the entry threshold measures and *over how much data*: the metric
- * toggle, the sample window, and the warnings that fire when the combination is self-defeating.
+ * The two analysis controls: how many ticks are analysed, and the above/below entry condition.
+ *
+ * The metric is deliberately **not** a control. An earlier version offered "Differs %" vs
+ * "Equals %" because the engine had been reading the wrong one; now that it reads Differs — the
+ * only thing the app trades — offering a choice between the two is a way to configure the app into
+ * behaving incorrectly. `AnalysisMetric` still exists in the model purely so already-migrated
+ * databases keep validating; the engine ignores it and always measures Differs.
  *
  * Extracted from [TradeSettingsScreen] to keep that file under the maintainability ceiling.
- *
- * Neither warning blocks saving or rewrites the user's number. The threshold is theirs; the screen
- * only states plainly which regime the combination puts them in.
  */
 @Composable
 fun AnalysisConditionFields(
-    targetDigit: Int,
-    metric: AnalysisMetric,
-    onMetricChange: (AnalysisMetric) -> Unit,
     operator: ComparisonOperator,
+    onOperatorChange: (ComparisonOperator) -> Unit,
+    thresholdText: String,
+    onThresholdTextChange: (String) -> Unit,
     thresholdPercent: Double,
     windowText: String,
     onWindowTextChange: (String) -> Unit,
@@ -69,16 +69,13 @@ fun AnalysisConditionFields(
     minSampleSize: Int,
     modifier: Modifier = Modifier
 ) {
-    val baseline = if (metric == AnalysisMetric.DIFFERS_PERCENT) DIFFERS_BASELINE else EQUALS_BASELINE
-    val metricName = if (metric == AnalysisMetric.DIFFERS_PERCENT) "Differs %" else "Equals %"
-
     // A condition at or below the baseline is satisfied by ordinary market behaviour, so it
     // qualifies on nearly every tick rather than selecting anything.
     val firesConstantly = when (operator) {
-        ComparisonOperator.GREATER_THAN -> thresholdPercent <= baseline
-        ComparisonOperator.GREATER_OR_EQUAL -> thresholdPercent < baseline
-        ComparisonOperator.LESS_THAN -> thresholdPercent >= baseline
-        ComparisonOperator.LESS_OR_EQUAL -> thresholdPercent > baseline
+        ComparisonOperator.GREATER_THAN -> thresholdPercent <= DIFFERS_BASELINE
+        ComparisonOperator.GREATER_OR_EQUAL -> thresholdPercent < DIFFERS_BASELINE
+        ComparisonOperator.LESS_THAN -> thresholdPercent >= DIFFERS_BASELINE
+        ComparisonOperator.LESS_OR_EQUAL -> thresholdPercent > DIFFERS_BASELINE
     }
 
     val windowTooSmall = (windowText.toIntOrNull() ?: minWindow) < minSampleSize
@@ -87,38 +84,6 @@ fun AnalysisConditionFields(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = "Measure:",
-            fontSize = 13.sp,
-            color = TextSecondary,
-            fontWeight = FontWeight.SemiBold
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            AnalysisMetric.values().forEach { option ->
-                val isSelected = metric == option
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isSelected) VividYellow else Color(0xFF232734))
-                        .clickable { onMetricChange(option) }
-                        .padding(vertical = 10.dp)
-                        .testTag("metric_${option.symbol}"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = option.label,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isSelected) Color(0xFF101216) else TextPrimary
-                    )
-                }
-            }
-        }
-
         OutlinedTextField(
             value = windowText,
             // Digits only, capped at 4 chars: 1000 is the retained-history ceiling, so anything
@@ -131,7 +96,7 @@ fun AnalysisConditionFields(
             },
             supportingText = {
                 Text(
-                    text = "Sample window every percentage is computed over ($minWindow–$maxWindow).",
+                    text = "Sample window used by both Differs and Over/Under analysis ($minWindow–$maxWindow).",
                     fontSize = 11.sp,
                     color = TextSecondary
                 )
@@ -164,15 +129,97 @@ fun AnalysisConditionFields(
             )
         }
 
+        Text(
+            text = "Enter when Differs % is:",
+            fontSize = 13.sp,
+            color = TextSecondary,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            listOf(
+                ComparisonOperator.GREATER_THAN to "Above",
+                ComparisonOperator.LESS_THAN to "Below"
+            ).forEach { (option, label) ->
+                val isSelected = operator == option
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isSelected) VividYellow else Color(0xFF232734))
+                        .clickable { onOperatorChange(option) }
+                        .padding(vertical = 10.dp)
+                        .testTag("operator_${option.symbol}"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isSelected) Color(0xFF101216) else TextPrimary
+                    )
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = thresholdText,
+            // Digits and at most one decimal point — a percentage.
+            onValueChange = { input ->
+                val cleaned = input.filter { it.isDigit() || it == '.' }
+                    .let { text ->
+                        val firstDot = text.indexOf('.')
+                        if (firstDot == -1) text
+                        else text.substring(0, firstDot + 1) + text.substring(firstDot + 1).replace(".", "")
+                    }
+                onThresholdTextChange(cleaned.take(6))
+            },
+            label = { Text("Threshold Percentage") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            trailingIcon = {
+                Text(
+                    text = "%",
+                    color = VividYellow,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(end = 12.dp)
+                )
+            },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = VividYellow,
+                unfocusedBorderColor = BorderDark,
+                focusedLabelColor = VividYellow,
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary,
+                focusedContainerColor = Color(0xFF13151D),
+                unfocusedContainerColor = Color(0xFF13151D)
+            ),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.fillMaxWidth().testTag("threshold_input")
+        )
+
         if (firesConstantly) {
             WarningCard(
                 testTag = "threshold_fires_constantly_warning",
-                title = "This threshold will qualify almost every tick",
-                body = "$metricName normally sits near " +
-                    "${String.format(Locale.US, "%.0f", baseline)}% on live ticks, so " +
-                    "${String.format(Locale.US, "%.1f", thresholdPercent)}% " +
-                    "${operator.label.lowercase()} describes ordinary market behaviour rather than " +
-                    "a selectable moment. The bot will enter continuously.",
+                title = if (operator == ComparisonOperator.GREATER_THAN ||
+                    operator == ComparisonOperator.GREATER_OR_EQUAL
+                ) {
+                    "This threshold will qualify almost every tick"
+                } else {
+                    "This threshold is rare — the bot may never trade"
+                },
+                body = "Differs % normally sits near " +
+                    "${String.format(Locale.US, "%.0f", DIFFERS_BASELINE)}% on live ticks. " +
+                    (if (operator == ComparisonOperator.GREATER_THAN ||
+                        operator == ComparisonOperator.GREATER_OR_EQUAL
+                    ) {
+                        "A threshold at or below that is ordinary market behaviour, not a filter, " +
+                            "so the bot would enter continuously."
+                    } else {
+                        "Entering only below this figure needs the target digit to be running well " +
+                            "above its usual share — and a contract that rarely wins."
+                    }),
                 tint = Color(0xFFF0879A),
                 background = Color(0xFF241016),
                 borderColor = Color(0xFF6B2F3A)
@@ -180,9 +227,8 @@ fun AnalysisConditionFields(
         }
 
         Text(
-            text = "Percentages are measured over recent ticks only. They describe what has already " +
-                "happened in the window — they are not a prediction of the next tick, and a " +
-                "qualifying reading is not a guarantee that the contract will win.",
+            text = "Percentages describe what has already happened in the window. They are not a " +
+                "prediction of the next tick, and a qualifying reading does not guarantee a win.",
             fontSize = 10.sp,
             color = TextSecondary.copy(alpha = 0.75f)
         )
@@ -190,7 +236,7 @@ fun AnalysisConditionFields(
 }
 
 @Composable
-private fun WarningCard(
+fun WarningCard(
     testTag: String,
     title: String,
     body: String,

@@ -70,7 +70,6 @@ fun SettingsScreen(
     userProfile: UserProfileEntity,
     activeAccount: DerivAccount?,
     connectionStatus: ConnectionStatus,
-    onDepositClick: () -> Unit,
     onClearHistoryClick: () -> Unit,
     onSignOutClick: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -135,14 +134,9 @@ fun SettingsScreen(
                         }
                     }
 
-                    Button(
-                        onClick = onDepositClick,
-                        colors = ButtonDefaults.buttonColors(containerColor = VividYellow, contentColor = Color(0xFF101216)),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(text = "Top Up", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
+                    // No Top Up action: this app initiates and analyses trades only. Deposits
+                    // and withdrawals happen in Deriv's own client, and offering a button here
+                    // implied a funding integration that does not exist.
                 }
             }
         }
@@ -266,8 +260,31 @@ fun SettingsScreen(
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
-            title = { Text(text = "Reset Database Records", color = TextPrimary, fontWeight = FontWeight.Bold) },
-            text = { Text(text = "Are you sure you want to delete all stored trade simulations and analysis events? This cannot be undone.", color = TextSecondary) },
+            title = { Text(text = "Delete Trade & Analysis History", color = TextPrimary, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        text = "This permanently deletes, for your signed-in account only:",
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = "• Trade history on account " +
+                            (activeAccount?.id ?: "unknown") +
+                            (if (activeAccount?.kind == com.tickedge.data.deriv.DerivAccountKind.REAL) " (REAL)" else " (DEMO)"),
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    Text(
+                        text = "• All recorded analysis events for your user",
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = "History on your other account is kept. This cannot be undone.",
+                        color = StatRed,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            },
             confirmButton = {
                 Button(
                     onClick = {

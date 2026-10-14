@@ -162,11 +162,11 @@ data class TradeSettings(
     val digitSelectionMode: DigitSelectionMode = DigitSelectionMode.FIXED,
     /** How many recent ticks the analysis is computed over (1..1000). */
     val analysisWindowSize: Int = 100,
-    val stakeAmount: Double = 1.00,
-    val takeProfit: Double = 0.50,
-    val stopLoss: Double = 5.00,
+    val stakeAmount: Double = 0.35,
+    val takeProfit: Double = 10.0,
+    val stopLoss: Double = 10.0,
     val durationUnit: TradeDurationUnit = TradeDurationUnit.TICKS,
-    val durationValue: Int = 5,
+    val durationValue: Int = 1,
     val martingaleEnabled: Boolean = true
 )
 

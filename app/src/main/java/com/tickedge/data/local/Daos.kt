@@ -155,6 +155,16 @@ interface SimulationDao {
     @Query("DELETE FROM simulation_positions WHERE userId = :userId")
     suspend fun clearPositionsForUser(userId: String)
 
+    /**
+     * Delete positions for one account only.
+     *
+     * Scoping by account as well as user matters because demo and real results are not
+     * interchangeable: a "clear my history" action that silently wiped the real account's record
+     * while leaving the demo one would destroy exactly the data the user most needs.
+     */
+    @Query("DELETE FROM simulation_positions WHERE userId = :userId AND accountId = :accountId")
+    suspend fun clearPositionsForUserAndAccount(userId: String, accountId: String)
+
     /** Delete all positions regardless of user. */
     @Query("DELETE FROM simulation_positions")
     suspend fun clearAllPositions()

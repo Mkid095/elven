@@ -32,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -94,7 +95,6 @@ fun SystemConfigDialog(
     onDismiss: () -> Unit,
     onSave: (SystemConfig) -> Unit
 ) {
-    var randomMarkets by remember { mutableStateOf(initialConfig.randomMarkets) }
     var maxTrades by remember { mutableStateOf("${initialConfig.maxTradesPerMarket}") }
     var maxDailyLoss by remember { mutableStateOf("${initialConfig.maxDailyLoss}") }
     var stopOnLimit by remember { mutableStateOf(initialConfig.stopTradingOnLimit) }
@@ -119,48 +119,45 @@ fun SystemConfigDialog(
                     color = VividYellow
                 )
 
+                // Random market selection is not a preference. The engine always draws the next
+                // market at random, so a switch that could be turned off only let the UI claim
+                // something the bot does not do.
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF171A24), RoundedCornerShape(10.dp))
+                        .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
+                        .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Random Markets Switch",
+                            text = "Random markets: always on",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
+                            color = VividYellow
                         )
                         Text(
-                            text = "Execute trades randomly across 5 synthetic indices",
+                            text = "Every trade is placed on a randomly chosen synthetic index " +
+                                "across the 5 supported markets.",
                             fontSize = 11.sp,
                             color = TextSecondary
                         )
                     }
-                    Switch(
-                        checked = randomMarkets,
-                        onCheckedChange = { randomMarkets = it },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color(0xFF101216),
-                            checkedTrackColor = VividYellow
-                        )
-                    )
                 }
 
-                if (!randomMarkets) {
-                    OutlinedTextField(
-                        value = maxTrades,
-                        onValueChange = { maxTrades = it },
-                        label = { Text("Max Trades per Market before Switching") },
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = VividYellow,
-                            unfocusedBorderColor = BorderDark,
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                OutlinedTextField(
+                    value = maxTrades,
+                    onValueChange = { maxTrades = it },
+                    label = { Text("Max Trades per Market before Switching") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = VividYellow,
+                        unfocusedBorderColor = BorderDark,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 OutlinedTextField(
                     value = maxDailyLoss,
@@ -191,8 +188,36 @@ fun SystemConfigDialog(
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color(0xFF101216),
                             checkedTrackColor = VividYellow
-                        )
+                        ),
+                        modifier = Modifier.testTag("stop_on_limit_toggle")
                     )
+                }
+
+                if (!stopOnLimit) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF241016), RoundedCornerShape(10.dp))
+                            .border(1.dp, Color(0xFF6B2F3A), RoundedCornerShape(10.dp))
+                            .padding(12.dp)
+                            .testTag("stop_limit_disabled_warning")
+                    ) {
+                        Column {
+                            Text(
+                                text = "You have passed the daily stop loss limit",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = StatRed
+                            )
+                            Text(
+                                text = "Automatic stopping is OFF, so the bot will keep trading past " +
+                                    "the ${maxDailyLoss.ifBlank { "0.00" }} limit and can keep losing " +
+                                    "money today. Turn this back on to enforce the limit.",
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
                 }
 
                 Row(
@@ -215,7 +240,8 @@ fun SystemConfigDialog(
                             val parsedLoss = maxDailyLoss.toDoubleOrNull() ?: initialConfig.maxDailyLoss
                             onSave(
                                 SystemConfig(
-                                    randomMarkets = randomMarkets,
+                                    // Always true — see the panel above.
+                                    randomMarkets = true,
                                     maxTradesPerMarket = parsedTrades,
                                     maxDailyLoss = parsedLoss,
                                     stopTradingOnLimit = stopOnLimit

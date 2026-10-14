@@ -62,6 +62,9 @@ private const val MIN_ANALYSIS_WINDOW = 1
 /** Largest analysis window; matches the retained-history cap in [DerivWebSocketService]. */
 private const val MAX_ANALYSIS_WINDOW = 1000
 
+/** Window used before any user has saved settings, and after sign-out resets. */
+private const val DEFAULT_ANALYSIS_WINDOW = 100
+
 /**
  * Ticks required before a threshold is considered meaningful.
  *
@@ -220,12 +223,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun derivLogout() {
         tradingEngine.stopTrading()
+        viewModelScope.launch { endSession() }
         oauth.logout()
         // Drop the FIDScript session too — its refresh token grants read/write on this user's
         // rows, so it must not outlive the Deriv sign-in on this device.
         fidscriptSession.signOut()
         _syncState.value = SyncState.Idle
         deriv.dispose()
+
+        // Clear the previous user's settings and the session they were trading in.
+        //
+        // Settings are per-user in the database, and loadPersistedSettings() pulls the next
+        // signer's own values — but that load is asynchronous. Without this reset the outgoing
+        // user's stake, thresholds and live-trading arming stay visible to whoever signs in next,
+        // and if they hit Start before the load lands, their first trade is sized from someone
+        // else's configuration.
+        _tradeSettings.value = TradeSettings()
+        _systemConfig.value = SystemConfig()
+        _realArmed.value = false
+        _requirePerOrderConfirm.value = true
+        _maxMartingaleSteps.value = 3
+        currentSessionId = NO_SESSION
+        _activeSessionId.value = null
+        _activeSession.value = null
+        // Back to a neutral window rather than the outgoing user's, for the same reason.
+        webSocketService.setWindowSize(DEFAULT_ANALYSIS_WINDOW)
     }
 
     /** Re-read the persisted OAuth session (called on app resume) and reload accounts if signed in. */
@@ -644,9 +666,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resolveConfirmation(approved: Boolean) { tradingEngine.resolvePendingConfirmation(approved) }
     fun dismissOutcomeBanner() { tradingEngine.dismissOutcomeBanner() }
 
+    /**
+     * Delete trade and analysis history for the signed-in user on the **currently selected
+     * account** only.
+     *
+     * Positions are scoped to the account because demo and real results are not interchangeable —
+     * a clear that wiped both would destroy the real account's record along with the demo one.
+     * Analysis events carry no account column (they are per-market observations), so they are
+     * cleared for the user as a whole and the confirmation dialog says so.
+     */
     fun clearHistory() {
+        val accountId = deriv.activeAccount?.id.orEmpty()
         viewModelScope.launch(Dispatchers.IO) {
-            db.simulationDao().clearPositionsForUser(currentUserId)
+            if (accountId.isBlank()) {
+                // No account resolved: refuse rather than falling back to a user-wide delete,
+                // which would remove more than the user was told would be removed.
+                android.util.Log.w("MainViewModel", "clearHistory ignored: no active account id")
+            } else {
+                db.simulationDao().clearPositionsForUserAndAccount(currentUserId, accountId)
+            }
             db.analysisEventDao().clearEventsForUser(currentUserId)
             tradingEngine.resetDailyLoss()
         }

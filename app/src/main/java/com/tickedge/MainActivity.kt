@@ -264,7 +264,6 @@ fun TickEdgeApp(
                     userProfile = userProfile,
                     activeAccount = activeAccount,
                     connectionStatus = overallConnection,
-                    onDepositClick = { /* handled via Deriv account */ },
                     onClearHistoryClick = { viewModel.clearHistory() },
                     onSignOutClick = { viewModel.derivLogout() }
                 )
