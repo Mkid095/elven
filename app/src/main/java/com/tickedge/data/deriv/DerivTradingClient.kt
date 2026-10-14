@@ -3,6 +3,7 @@ package com.tickedge.data.deriv
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -40,13 +41,24 @@ class DerivTradingClient(private val wsUrl: String) {
     @Volatile
     private var isOpen = false
 
-    fun connect() {
-        if (isOpen || socket != null) return
+    /**
+     * Opens the socket and **waits for the handshake to finish**.
+     *
+     * OkHttp's newWebSocket is asynchronous: it returns a WebSocket handle immediately, before any
+     * connection exists. A previous non-suspending version returned at that point, so callers sent
+     * their first proposal into a socket that had not completed its handshake. Deriv never saw it,
+     * the listener fired onFailure, and the trade died with an IllegalStateException that the
+     * engine did not catch — which presented as "trading starts and instantly stops".
+     */
+    suspend fun connect(timeoutMs: Long = 10_000L) {
+        if (isOpen) return
+        val ready = CompletableDeferred<Unit>()
         val req = Request.Builder().url(wsUrl).build()
         socket = client.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(tag, "trading WS connected")
                 isOpen = true
+                if (!ready.isCompleted) ready.complete(Unit)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -56,6 +68,11 @@ class DerivTradingClient(private val wsUrl: String) {
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.w(tag, "trading WS failure: ${t.message}")
                 isOpen = false
+                if (!ready.isCompleted) {
+                    ready.completeExceptionally(
+                        DerivApiException("trading socket failed to open: ${t.message}")
+                    )
+                }
                 pending.values.forEach { it.completeExceptionally(t) }
                 pending.clear()
             }

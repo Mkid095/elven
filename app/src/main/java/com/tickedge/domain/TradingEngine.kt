@@ -5,6 +5,7 @@ import com.tickedge.data.deriv.DerivAccountKind
 import com.tickedge.data.deriv.DerivApiException
 import com.tickedge.data.deriv.DerivContractParams
 import com.tickedge.data.deriv.DerivContractType
+import com.tickedge.data.deriv.DerivSettlement
 import com.tickedge.data.deriv.PlaceOrderPermit
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.SimulationPositionEntity
@@ -20,6 +21,7 @@ import com.tickedge.data.model.TradeDurationUnit
 import com.tickedge.data.model.TradeOutcome
 import com.tickedge.data.model.TradeSettings
 import com.tickedge.data.model.TradeType
+import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +52,9 @@ internal fun drawRandomDigit(previous: Int?): Int {
     val candidates = (0..9).filter { it != previous }
     return candidates.random()
 }
+
+/** Logcat tag for the trade execution path, which had no logging at all. */
+private const val tag = "TradingEngine"
 
 class TradingEngine(
     private val deriv: DerivClient,
@@ -426,7 +431,12 @@ class TradingEngine(
 
         val proposal = try {
             trading.proposal(params)
-        } catch (e: DerivApiException) {
+        } catch (e: Exception) {
+            // Deliberately broad. This previously caught only DerivApiException, so an
+            // IllegalStateException from the socket layer escaped, killed the trading coroutine,
+            // and left the UI showing Start pressed with nothing running — and nothing logged to
+            // explain it. A failed proposal must never be able to end the session.
+            Log.w(tag, "proposal failed for $symbol: ${e.message}", e)
             _recentTradeOutcome.value = SimulatedTrade(
                 id = java.util.UUID.randomUUID().toString(),
                 marketSymbol = symbol,
@@ -506,8 +516,16 @@ class TradingEngine(
         }
 
         val buy = try {
-            trading.buy(proposal.id, proposal.askPrice, orderPermit)
-        } catch (e: DerivApiException) {
+            trading.buy(proposal.id, proposal.askPrice, orderPermit).also {
+                Log.i(
+                    tag,
+                    "bought ${it.contractId.ifBlank { "(no id)" }} on $symbol " +
+                        "digit=$targetDigit stake=${"%.2f".format(stake)} real=${kind == DerivAccountKind.REAL}"
+                )
+            }
+        } catch (e: Exception) {
+            // Same reasoning as the proposal catch above: no single failure may end trading.
+            Log.w(tag, "buy failed for $symbol: ${e.message}", e)
             _activeTrade.value = null
             _simState.value = SimulatorState.STOPPED
             _recentTradeOutcome.value = SimulatedTrade(
@@ -536,7 +554,15 @@ class TradingEngine(
 
         _activeTrade.update { it?.copy(contractId = buy.contractId) }
 
-        val settlement = trading.awaitSettlement(buy.contractId)
+        // The stake has already left the account by this point, so a throw here must not end the
+        // session or lose the record of what was bought. Fall back to "not settled", which books
+        // the full stake as lost — the conservative outcome, since the money is gone either way.
+        val settlement = try {
+            trading.awaitSettlement(buy.contractId)
+        } catch (e: Exception) {
+            Log.w(tag, "settlement polling failed for ${buy.contractId}: ${e.message}", e)
+            DerivSettlement(buy.contractId, 0.0, 0.0, isWin = false, settled = false)
+        }
         val isWin = settlement.settled && settlement.isWin
 
         // An unsettled contract has still been paid for: buy_price left the account and will not

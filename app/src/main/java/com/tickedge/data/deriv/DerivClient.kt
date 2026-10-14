@@ -65,10 +65,27 @@ class DerivClient(
     }
 
     /** Ensure a trading socket for the active account is connected; returns it (or null). */
+    /**
+     * Returns a trading client that is genuinely connected, or null.
+     *
+     * Previously this returned whatever `reconnect()` produced without checking it had opened, so
+     * the caller received a client whose socket had not completed its handshake — and the first
+     * request failed with an exception the caller did not expect. The result is now verified, and
+     * the reason is logged so a failure is diagnosable rather than silent.
+     */
     suspend fun ensureTrading(): DerivTradingClient? {
         _trading.value?.let { if (it.isConnected()) return it }
         reconnect()
-        return _trading.value
+        val client = _trading.value
+        if (client == null || !client.isConnected()) {
+            android.util.Log.w(
+                "DerivClient",
+                "Trading socket unavailable (account=${activeAccount?.id}, " +
+                    "connected=${client?.isConnected()})"
+            )
+            return null
+        }
+        return client
     }
 
     private suspend fun reconnect() {
