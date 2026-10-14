@@ -2,7 +2,6 @@ package com.tickedge.domain
 
 import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
-import com.tickedge.data.model.DiffersStats
 import com.tickedge.data.model.DigitFrequency
 import com.tickedge.data.model.OverUnderStats
 import com.tickedge.data.model.TickObservation
@@ -97,7 +96,8 @@ object DigitAnalysisEngine {
      * Under: digits strictly less than d
      * Matches: digits equal to d
      */
-    fun computeOverUnderStats(ticks: List<TickObservation>): List<OverUnderStats> {        val total = ticks.size.coerceAtLeast(1).toDouble()
+    fun computeOverUnderStats(ticks: List<TickObservation>): List<OverUnderStats> {
+        val total = ticks.size.coerceAtLeast(1).toDouble()
 
         return (0..9).map { d ->
             val overCount = ticks.count { it.lastDigit > d }
@@ -112,29 +112,6 @@ object DigitAnalysisEngine {
                 underPercentage = (underCount / total) * 100.0,
                 matchCount = matchCount,
                 matchPercentage = (matchCount / total) * 100.0
-            )
-        }
-    }
-
-    /**
-     * Computes Matches/Differs statistics for digits 0 through 9 across the selected tick window.
-     *
-     * Mirrors [computeOverUnderStats] so the two analysis tabs read identically. [differsPercentage]
-     * is the probability that decides a `DIGITDIFF` contract: it settles as a win when the last
-     * digit of the final tick is not [digit], so a high value means a safe contract.
-     */
-    fun computeDiffersStats(ticks: List<TickObservation>): List<DiffersStats> {
-        val total = ticks.size.coerceAtLeast(1).toDouble()
-
-        return (0..9).map { d ->
-            val matchCount = ticks.count { it.lastDigit == d }
-            val differsCount = ticks.count { it.lastDigit != d }
-            DiffersStats(
-                digit = d,
-                matchCount = matchCount,
-                matchPercentage = (matchCount / total) * 100.0,
-                differsCount = differsCount,
-                differsPercentage = (differsCount / total) * 100.0
             )
         }
     }
@@ -188,64 +165,5 @@ object DigitAnalysisEngine {
             ComparisonOperator.LESS_THAN -> observedPercent < thresholdPercent
             ComparisonOperator.LESS_OR_EQUAL -> observedPercent <= thresholdPercent
         }
-    }
-
-    /**
-     * Generates a step-by-step Martingale Risk and Recovery Table based on
-     * the base stake and chosen Over/Under recovery configuration.
-     */
-    fun computeMartingaleRiskTable(settings: com.tickedge.data.model.TradeSettings): List<com.tickedge.data.model.MartingaleRiskStep> {
-        val baseStake = settings.stakeAmount.coerceAtLeast(0.35)
-        val recoveryDirection = settings.recoveryDirection
-        val recoveryDigit = settings.recoveryDigit
-
-        // Probability of recovery win
-        val recoveryWinningDigits = if (recoveryDirection.equals("OVER", ignoreCase = true)) {
-            (recoveryDigit + 1..9).count()
-        } else {
-            (0 until recoveryDigit).count()
-        }
-        val recoveryProb = recoveryWinningDigits * 10.0 // each digit is 10% theoretical
-
-        val steps = mutableListOf<com.tickedge.data.model.MartingaleRiskStep>()
-
-        // Step 1: Base Differs trade
-        val step1Gross = baseStake * 1.10
-        steps.add(
-            com.tickedge.data.model.MartingaleRiskStep(
-                step = 1,
-                contractType = "Differs (${settings.targetDigit})",
-                stake = baseStake,
-                cumulativeRisk = baseStake,
-                potentialGrossReturn = step1Gross,
-                netProfitOnWin = baseStake * 0.10,
-                winProbabilityEstimate = 90.0
-            )
-        )
-
-        var cumRisk = baseStake
-        var currentMultiplier = 2.0
-
-        for (lvl in 2..5) {
-            val stepStake = baseStake * currentMultiplier
-            cumRisk += stepStake
-            val gross = stepStake * 1.95
-            val net = gross - cumRisk
-
-            steps.add(
-                com.tickedge.data.model.MartingaleRiskStep(
-                    step = lvl,
-                    contractType = "Recovery ($recoveryDirection $recoveryDigit)",
-                    stake = stepStake,
-                    cumulativeRisk = cumRisk,
-                    potentialGrossReturn = gross,
-                    netProfitOnWin = net,
-                    winProbabilityEstimate = recoveryProb.toDouble()
-                )
-            )
-            currentMultiplier *= 2.0
-        }
-
-        return steps
     }
 }

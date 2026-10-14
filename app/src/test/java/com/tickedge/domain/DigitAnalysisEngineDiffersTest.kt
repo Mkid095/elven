@@ -3,7 +3,6 @@ package com.tickedge.domain
 import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.data.model.DigitFrequency
-import com.tickedge.data.model.TickObservation
 import com.tickedge.data.model.TrendDirection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -21,73 +20,69 @@ import org.junit.Test
  */
 class DigitAnalysisEngineDiffersTest {
 
-    /** Minimal TickObservation — only `lastDigit` is read by the functions under test. */
-    private fun tick(digit: Int) = TickObservation(
-        epoch = 0L,
-        quote = 0.0,
-        pipSize = 3,
-        formattedQuote = "0.000",
-        lastDigit = digit
-    )
-
-    /** `counts[i]` ticks whose last digit is i. */
-    private fun ticksFromCounts(vararg counts: Int): List<TickObservation> =
-        counts.flatMapIndexed { digit, count -> List(count) { tick(digit) } }
-
     private fun frequencies(vararg percents: Double): List<DigitFrequency> =
         percents.mapIndexed { digit, pct -> DigitFrequency(digit, 0, pct, TrendDirection.EQUAL) }
 
-    // ---------------------------------------------------------------- computeDiffersStats
+    // ------------------------------------------------ differs vs matches complement
 
     @Test
-    fun `differs and match percentages are exact complements`() {
-        // 100 ticks: digit 3 appears 12 times, the other 88 differ from it.
-        // counts[i] is the count FOR DIGIT i, so digit 3's 12 sits at index 3.
-        val ticks = ticksFromCounts(0, 0, 0, 12, 0, 0, 0, 0, 0, 88)
-        val stats = DigitAnalysisEngine.computeDiffersStats(ticks).first { it.digit == 3 }
+    fun `differs is the exact complement of matches`() {
+        // 100 ticks where digit 3 appears 12 times: matches 12.0%, differs 88.0%, summing to 100.
+        // frequencies() takes percentages, so a 12.0 entry stands for those 12 ticks.
+        val freqs = frequencies(0.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-        assertEquals(12, stats.matchCount)
-        assertEquals(88, stats.differsCount)
-        assertEquals(12.0, stats.matchPercentage, 0.001)
-        assertEquals(88.0, stats.differsPercentage, 0.001)
-        assertEquals(100.0, stats.matchPercentage + stats.differsPercentage, 0.001)
+        val matches = freqs.first { it.digit == 3 }.percentage
+        val differs = DigitAnalysisEngine.differsPercentFor(freqs, 3)
+
+        assertEquals(12.0, matches, 0.001)
+        assertEquals(88.0, differs, 0.001)
+        assertEquals(100.0, matches + differs, 0.001)
     }
 
     @Test
-    fun `differs counts sum to the window size for every digit`() {
-        val ticks = ticksFromCounts(10, 0, 25, 0, 5, 60)
-        val total = ticks.size
-
-        DigitAnalysisEngine.computeDiffersStats(ticks).forEach { stat ->
+    fun `match and differs percentages sum to one hundred for every digit`() {
+        // A plausible non-uniform window: one digit running hot, the rest sharing the remainder.
+        val freqs = frequencies(
+            9.4, 9.1, 8.8, 30.0, 8.2, 7.9, 7.6, 7.4, 6.0, 5.6
+        )
+        freqs.forEach { freq ->
             assertEquals(
-                "digit ${stat.digit} differs+match should equal the window size",
-                total,
-                stat.differsCount + stat.matchCount
+                "digit ${freq.digit} does not sum to 100",
+                100.0,
+                freq.percentage + DigitAnalysisEngine.differsPercentFor(freqs, freq.digit),
+                0.001
             )
         }
     }
 
     @Test
-    fun `empty window yields zeroed stats instead of dividing by zero`() {
-        val stats = DigitAnalysisEngine.computeDiffersStats(emptyList())
+    fun `a digit that never appears is a fully differing contract`() {
+        val freqs = frequencies(10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4)
 
-        assertEquals(10, stats.size)
-        stats.forEach { stat ->
-            assertEquals(0, stat.matchCount)
-            assertEquals(0, stat.differsCount)
-            // 0/1 coerced — must be a real 0.0, not NaN from 0/0.
-            assertEquals(0.0, stat.matchPercentage, 0.001)
-            assertEquals(0.0, stat.differsPercentage, 0.001)
+        assertEquals(90.0, DigitAnalysisEngine.differsPercentFor(freqs, 0), 0.001)
+    }
+
+    @Test
+    fun `a fair window puts every digit at ninety percent differs`() {
+        val freqs = frequencies(10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0)
+
+        freqs.forEach { freq ->
+            assertEquals(
+                "digit ${freq.digit}",
+                90.0,
+                DigitAnalysisEngine.differsPercentFor(freqs, freq.digit),
+                0.001
+            )
         }
     }
 
     @Test
-    fun `a uniform window puts every digit at ninety percent differs`() {
-        // Ten digits, ten ticks each: the fair-distribution baseline.
-        val stats = DigitAnalysisEngine.computeDiffersStats(ticksFromCounts(10, 10, 10, 10, 10, 10, 10, 10, 10, 10))
+    fun `an empty window reads as zero matches rather than dividing by zero`() {
+        val empty = DigitAnalysisEngine.computeFrequencies(emptyList())
 
-        stats.forEach { stat ->
-            assertEquals("digit ${stat.digit}", 90.0, stat.differsPercentage, 0.001)
+        empty.forEach { freq ->
+            assertEquals(0.0, freq.percentage, 0.001)
+            assertEquals(100.0, DigitAnalysisEngine.differsPercentFor(empty, freq.digit), 0.001)
         }
     }
 

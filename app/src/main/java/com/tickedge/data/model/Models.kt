@@ -117,20 +117,6 @@ data class OverUnderStats(
     val matchPercentage: Double
 )
 
-/**
- * Matches/Differs statistics for digits 0 through 9 across the selected tick window.
- *
- * [differsPercentage] is the probability that decides a `DIGITDIFF` contract: it wins when the
- * last digit of the final tick is not [digit]. [matchPercentage] is its exact complement.
- */
-data class DiffersStats(
-    val digit: Int,
-    val matchCount: Int,
-    val matchPercentage: Double,
-    val differsCount: Int,
-    val differsPercentage: Double
-)
-
 data class MarketState(
     val symbol: String,
     val displayName: String,
@@ -168,16 +154,6 @@ data class TradeSettings(
     val durationUnit: TradeDurationUnit = TradeDurationUnit.TICKS,
     val durationValue: Int = 1,
     val martingaleEnabled: Boolean = true
-)
-
-data class MartingaleRiskStep(
-    val step: Int,
-    val contractType: String,
-    val stake: Double,
-    val cumulativeRisk: Double,
-    val potentialGrossReturn: Double,
-    val netProfitOnWin: Double,
-    val winProbabilityEstimate: Double
 )
 
 data class SystemConfig(
