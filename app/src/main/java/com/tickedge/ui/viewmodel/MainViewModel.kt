@@ -18,6 +18,7 @@ import com.tickedge.data.local.UserSettingsEntity
 import com.tickedge.data.model.AccountType
 import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
+import com.tickedge.data.model.DigitSelectionMode
 import com.tickedge.data.model.MarketState
 import com.tickedge.data.model.SystemConfig
 import com.tickedge.data.model.TradeDurationUnit
@@ -490,6 +491,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     comparisonOperator = s.comparisonOperator.symbol,
                     thresholdPercent = s.thresholdPercent,
                     analysisMetric = s.analysisMetric.symbol,
+                    digitSelectionMode = s.digitSelectionMode.symbol,
                     minimumSampleSize = MIN_ANALYSIS_SAMPLE,
                     stakeAmount = s.stakeAmount,
                     takeProfit = s.takeProfit,
@@ -563,6 +565,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         thresholdPercent = e.thresholdPercent,
         analysisMetric = AnalysisMetric.values()
             .firstOrNull { it.symbol == e.analysisMetric } ?: AnalysisMetric.DIFFERS_PERCENT,
+        digitSelectionMode = DigitSelectionMode.values()
+            .firstOrNull { it.symbol == e.digitSelectionMode } ?: DigitSelectionMode.FIXED,
         analysisWindowSize = e.windowSize.coerceIn(MIN_ANALYSIS_WINDOW, MAX_ANALYSIS_WINDOW),
         stakeAmount = e.stakeAmount,
         takeProfit = e.takeProfit,

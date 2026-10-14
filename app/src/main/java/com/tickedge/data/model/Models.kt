@@ -43,6 +43,18 @@ enum class AnalysisMetric(val symbol: String, val label: String) {
     EQUALS_PERCENT("equals_pct", "Equals % (digit)")
 }
 
+/**
+ * How the Differs target digit is chosen for each opportunity.
+ *
+ * [RANDOM] picks a digit first and *then* tests it against the threshold — it is not a licence to
+ * trade. A randomly chosen digit that does not qualify produces no order, so random mode widens
+ * which digits get considered rather than bypassing the entry condition.
+ */
+enum class DigitSelectionMode(val symbol: String, val label: String) {
+    FIXED("fixed", "Fixed digit"),
+    RANDOM("random", "Random digit")
+}
+
 enum class TradeType(val displayName: String) {
     DIFFERS("Differs (Main)"),
     OVER_UNDER("Over & Under (Recovery)")
@@ -146,6 +158,8 @@ data class TradeSettings(
     val thresholdPercent: Double = 70.0,
     /** Which probability [thresholdPercent] is compared against. See [AnalysisMetric]. */
     val analysisMetric: AnalysisMetric = AnalysisMetric.DIFFERS_PERCENT,
+    /** Whether [targetDigit] is fixed, or redrawn per market opportunity. See [DigitSelectionMode]. */
+    val digitSelectionMode: DigitSelectionMode = DigitSelectionMode.FIXED,
     /** How many recent ticks the analysis is computed over (1..1000). */
     val analysisWindowSize: Int = 100,
     val stakeAmount: Double = 1.00,

@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimulationSessionEntity::class,
         SimulationPositionEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -35,7 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "tickedge_database"
                 )
-                    .addMigrations(MIGRATION_4_TO_5, MIGRATION_5_TO_6)
+                    .addMigrations(MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7)
                     .build()
                 INSTANCE = instance
                 instance
@@ -279,6 +279,20 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "ALTER TABLE `analysis_events` ADD COLUMN `analysisMetric` TEXT NOT NULL DEFAULT 'equals_pct'"
+                )
+            }
+        }
+        /**
+         * v6 -> v7: record whether the Differs target digit is fixed or randomly redrawn.
+         *
+         * Additive, so ALTER TABLE ADD COLUMN — recreating the table for an added column silently
+         * drops foreign keys and no-ops the index (see MIGRATION_5_TO_6's note for the full story
+         * of how that shipped as a launch crash).
+         */
+        private val MIGRATION_6_TO_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `digitSelectionMode` TEXT NOT NULL DEFAULT 'fixed'"
                 )
             }
         }

@@ -429,11 +429,31 @@ fun AnalysisScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(text = "Digit", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(36.dp))
-                    Text(text = "Distribution Bar", fontSize = 12.sp, color = TextSecondary)
-                    Text(text = "Count", fontSize = 12.sp, color = TextSecondary)
-                    Text(text = "Prob %", fontSize = 12.sp, color = TextSecondary)
-                    Text(text = "Trend", fontSize = 12.sp, color = TextSecondary)
+                    Text(text = "Digit", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(30.dp))
+                    Text(text = "Matches Bar", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.weight(1f))
+                    Text(
+                        text = "Match",
+                        fontSize = 12.sp,
+                        color = TextSecondary,
+                        modifier = Modifier.width(28.dp),
+                        textAlign = TextAlign.End
+                    )
+                    Text(
+                        text = "Match %",
+                        fontSize = 12.sp,
+                        color = TextSecondary,
+                        modifier = Modifier.width(42.dp),
+                        textAlign = TextAlign.End
+                    )
+                    Text(
+                        text = "Differs %",
+                        fontSize = 12.sp,
+                        color = StatGreen,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.width(52.dp),
+                        textAlign = TextAlign.End
+                    )
+                    Text(text = "Trend", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(14.dp))
                 }
             }
 
@@ -449,8 +469,11 @@ fun AnalysisScreen(
 
             // Summary of Most & Least Appeared Digits
             item {
-                val mostFrequent = currentMarket.digitFrequencies.maxByOrNull { it.count }
-                val leastFrequent = currentMarket.digitFrequencies.minByOrNull { it.count }
+                // Best/most-traded is chosen on the contract's own metric: the digit that has
+                // matched least is the one a Differs contract is safest on, so that is the
+                // "best" card — not the digit that has matched most.
+                val mostFrequent = currentMarket.digitFrequencies.minByOrNull { it.count }
+                val leastFrequent = currentMarket.digitFrequencies.maxByOrNull { it.count }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -463,10 +486,11 @@ fun AnalysisScreen(
                         modifier = Modifier.weight(1f)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text(text = "Highest Frequency", fontSize = 11.sp, color = TextSecondary)
+                            Text(text = "Best Differs (lowest matches)", fontSize = 11.sp, color = TextSecondary)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Digit ${mostFrequent?.digit ?: "-"} (${String.format(Locale.US, "%.1f%%", mostFrequent?.percentage ?: 0.0)})",
+                                text = "Digit ${mostFrequent?.digit ?: "-"} · differs " +
+                                        String.format(Locale.US, "%.1f%%", 100.0 - (mostFrequent?.percentage ?: 0.0)),
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = StatGreen
@@ -481,10 +505,11 @@ fun AnalysisScreen(
                         modifier = Modifier.weight(1f)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Text(text = "Lowest Frequency", fontSize = 11.sp, color = TextSecondary)
+                            Text(text = "Worst Differs (highest matches)", fontSize = 11.sp, color = TextSecondary)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Digit ${leastFrequent?.digit ?: "-"} (${String.format(Locale.US, "%.1f%%", leastFrequent?.percentage ?: 0.0)})",
+                                text = "Digit ${leastFrequent?.digit ?: "-"} · differs " +
+                                        String.format(Locale.US, "%.1f%%", 100.0 - (leastFrequent?.percentage ?: 0.0)),
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = StatRed

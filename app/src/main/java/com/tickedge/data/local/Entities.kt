@@ -55,6 +55,8 @@ data class UserSettingsEntity(
     val thresholdPercent: Double = 70.0,
     /** Which probability `thresholdPercent` is compared against; see `AnalysisMetric`. */
     val analysisMetric: String = "differs_pct",
+    /** Whether the Differs target digit is fixed or redrawn per opportunity. */
+    val digitSelectionMode: String = "fixed",
     val minimumSampleSize: Int = 10,
     val stakeAmount: Double = 1.00,
     val takeProfit: Double = 0.50,

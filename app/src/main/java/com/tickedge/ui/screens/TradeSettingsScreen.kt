@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tickedge.data.model.AnalysisMetric
 import com.tickedge.data.model.ComparisonOperator
+import com.tickedge.data.model.DigitSelectionMode
 import com.tickedge.data.model.TradeDurationUnit
 import com.tickedge.data.model.TradeSettings
 import com.tickedge.ui.theme.BorderDark
@@ -92,6 +93,7 @@ fun TradeSettingsScreen(
     var operator by remember { mutableStateOf(currentSettings.comparisonOperator) }
     var thresholdText by remember { mutableStateOf("${currentSettings.thresholdPercent}") }
     var analysisMetric by remember { mutableStateOf(currentSettings.analysisMetric) }
+    var digitMode by remember { mutableStateOf(currentSettings.digitSelectionMode) }
     var analysisWindowText by remember { mutableStateOf("${currentSettings.analysisWindowSize}") }
     var stakeText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.stakeAmount)) }
     var takeProfitText by remember { mutableStateOf(String.format(Locale.US, "%.2f", currentSettings.takeProfit)) }
@@ -168,13 +170,54 @@ fun TradeSettingsScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "Target Number for Differs (Digit 0–9)",
+                            text = "Differs Target Digit",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = VividYellow
                         )
                         Text(
-                            text = "Base trade contract wins if exit tick last digit differs from this selected number.",
+                            text = "Base trade contract wins if exit tick last digit differs from this number.",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            DigitSelectionMode.values().forEach { mode ->
+                                val isSelected = digitMode == mode
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (isSelected) VividYellow else Color(0xFF232734))
+                                        .clickable { digitMode = mode }
+                                        .padding(vertical = 10.dp)
+                                        .testTag("digit_mode_${mode.symbol}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = mode.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) Color(0xFF101216) else TextPrimary
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = if (digitMode == DigitSelectionMode.FIXED) {
+                                "Always trades the digit you pick below."
+                            } else {
+                                "Draws a fresh digit per market opportunity. A drawn digit is still " +
+                                    "tested against your threshold — if it does not qualify, no trade " +
+                                    "is placed. Randomising widens which digits get considered, it " +
+                                    "does not bypass the entry condition."
+                            },
                             fontSize = 11.sp,
                             color = TextSecondary
                         )
@@ -898,6 +941,7 @@ fun TradeSettingsScreen(
                                 comparisonOperator = operator,
                                 thresholdPercent = parsedThreshold,
                                 analysisMetric = analysisMetric,
+                                digitSelectionMode = digitMode,
                                 analysisWindowSize = parsedWindow.coerceIn(
                                     MIN_ANALYSIS_WINDOW,
                                     MAX_ANALYSIS_WINDOW

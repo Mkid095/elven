@@ -217,6 +217,17 @@ fun MarketMiniCard(
     }
 }
 
+/**
+ * One row of the Differs distribution table.
+ *
+ * Shows both sides of the same observation, because the app trades `DIGITDIFF`:
+ *   - **Matches %** — how often this digit was the last digit of a tick.
+ *   - **Differs %** — its exact complement, and the number that actually decides the contract.
+ *
+ * Showing only Matches % invites reading "appeared 10%" as the contract's chance, which is the
+ * inverse of the truth. The bar is scaled to Matches %, so the two columns always read as
+ * complements of the same window rather than as two independent measurements.
+ */
 @Composable
 fun DigitFrequencyRow(
     frequency: DigitFrequency,
@@ -225,6 +236,7 @@ fun DigitFrequencyRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val differsPercentage = 100.0 - frequency.percentage
     val progress = if (maxPercentage > 0) (frequency.percentage / maxPercentage).toFloat() else 0f
     val animatedProgress by animateFloatAsState(targetValue = progress.coerceIn(0.02f, 1f), label = "prog")
 
@@ -274,26 +286,38 @@ fun DigitFrequencyRow(
             )
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(10.dp))
 
-        // Count
+        // Matches count
         Text(
             text = "${frequency.count}",
             fontSize = 12.sp,
             color = TextSecondary,
-            modifier = Modifier.width(32.dp),
+            modifier = Modifier.width(28.dp),
             textAlign = TextAlign.End
         )
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Probability Percentage
+        // Matches %
         Text(
-            text = String.format(Locale.US, "%.1f%%", frequency.percentage),
+            text = String.format(Locale.US, "%.1f", frequency.percentage),
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             color = if (isSelected) VividYellow else TextPrimary,
-            modifier = Modifier.width(50.dp),
+            modifier = Modifier.width(42.dp),
+            textAlign = TextAlign.End
+        )
+
+        Spacer(modifier = Modifier.width(10.dp))
+
+        // Differs % — the metric the contract actually settles on.
+        Text(
+            text = String.format(Locale.US, "%.1f%%", differsPercentage),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (isSelected) VividYellow else StatGreen,
+            modifier = Modifier.width(52.dp),
             textAlign = TextAlign.End
         )
 

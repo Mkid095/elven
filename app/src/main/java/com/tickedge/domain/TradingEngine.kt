@@ -7,6 +7,8 @@ import com.tickedge.data.deriv.DerivContractParams
 import com.tickedge.data.deriv.DerivContractType
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.SimulationPositionEntity
+import com.tickedge.data.model.DigitSelectionMode
+import java.util.concurrent.ConcurrentHashMap
 import com.tickedge.data.model.MarketState
 import com.tickedge.data.model.SimulatedTrade
 import com.tickedge.data.model.SupportedMarkets
@@ -35,6 +37,17 @@ import kotlinx.coroutines.withTimeoutOrNull
  * Safety: demo runs autonomously; a real account is only used when explicitly armed, and can
  * additionally require a per-order confirmation. Martingale doubling is capped.
  */
+/**
+ * Draws a random target digit for one market, avoiding an immediate repeat of [previous].
+ *
+ * Extracted as a pure top-level function so the no-repeat rule can be unit-tested; [TradingEngine]
+ * holds the per-market `previous` state.
+ */
+internal fun drawRandomDigit(previous: Int?): Int {
+    val candidates = (0..9).filter { it != previous }
+    return candidates.random()
+}
+
 class TradingEngine(
     private val deriv: DerivClient,
     private val database: AppDatabase,
@@ -149,19 +162,27 @@ class TradingEngine(
                     settings.stakeAmount
                 }
 
+                // Resolved BEFORE the condition is tested, and reused for the preview and the
+                // contract barrier. In RANDOM mode a draw that fails the threshold simply produces
+                // no order — randomisation widens which digits are considered, it never bypasses
+                // the entry condition.
+                val targetDigit = resolveTargetDigit(settings, chosenSymbol, isRecovery)
+
                 // Entry condition. Recovery trades must always execute to recover exposure, but a
                 // fresh Differs entry previously fired on a fixed 1.5s cadence regardless of the
                 // digit statistics — the threshold settings were recorded and never consulted.
-                if (!isRecovery && !entryConditionMet(settings, chosenSymbol, getMarketState)) {
+                if (!isRecovery && !entryConditionMet(settings, chosenSymbol, targetDigit, getMarketState)) {
                     _simState.value = SimulatorState.SCANNING
                     delay(POLL_INTERVAL_MS)
                     continue
                 }
 
-                val preview = buildPreview(chosenSymbol, settings, tradeType, isRecovery, stake)
+                val preview = buildPreview(chosenSymbol, settings, tradeType, isRecovery, stake, targetDigit)
                 _nextTrade.value = preview
 
-                val executed = executeRealTrade(settings, config, getMarketState, safety, chosenSymbol, tradeType, stake, preview)
+                val executed = executeRealTrade(
+                    settings, config, getMarketState, safety, chosenSymbol, tradeType, stake, preview, targetDigit
+                )
                 if (!executed) {
                     // A safety gate blocked the order (e.g. real account not armed), or the
                     // socket dropped. Previously this only broke the loop, leaving _simState on
@@ -189,13 +210,36 @@ class TradingEngine(
      * minimum sample size, and refusing to trade until enough ticks accumulate is the intended
      * behaviour rather than an error.
      */
+    /**
+     * Last randomly drawn target digit per market.
+     *
+     * Retained per symbol (not globally) because the requirement is that each market works a
+     * different digit, and it also prevents an immediate repeat on the same market — a uniform
+     * redraw would otherwise repeat 1 time in 10, which looks like a stuck digit to the user.
+     */
+    private val lastRandomDigit = ConcurrentHashMap<String, Int>()
+
+    /**
+     * The digit this opportunity will actually trade.
+     *
+     * Resolved once per opportunity and threaded through the condition check, the preview and the
+     * contract barrier, so all three always agree on which digit is being traded. Recovery trades
+     * ignore this: Over/Under recovery targets its own digit.
+     */
+    private fun resolveTargetDigit(settings: TradeSettings, symbol: String, isRecovery: Boolean): Int {
+        if (isRecovery) return settings.recoveryDigit
+        if (settings.digitSelectionMode == DigitSelectionMode.FIXED) return settings.targetDigit
+        return lastRandomDigit.compute(symbol) { _, previous -> drawRandomDigit(previous) }!!
+    }
+
     private fun entryConditionMet(
         settings: TradeSettings,
         symbol: String,
+        targetDigit: Int,
         getMarketState: (String) -> MarketState?
     ): Boolean {
         val state = getMarketState(symbol) ?: return false
-        if (state.digitFrequencies.none { it.digit == settings.targetDigit }) return false
+        if (state.digitFrequencies.none { it.digit == targetDigit }) return false
 
         // The contract bought is DIGITDIFF, which wins when the final tick's last digit is NOT
         // the target. Comparing the raw equals-% against the threshold therefore inverted the
@@ -203,7 +247,7 @@ class TradingEngine(
         // was most likely to lose. Resolve the configured metric instead of assuming one.
         val observedPercent = DigitAnalysisEngine.observedPercentFor(
             frequencies = state.digitFrequencies,
-            targetDigit = settings.targetDigit,
+            targetDigit = targetDigit,
             metric = settings.analysisMetric
         )
         return DigitAnalysisEngine.evaluateCondition(
@@ -235,10 +279,10 @@ class TradingEngine(
         settings: TradeSettings,
         tradeType: TradeType,
         isRecovery: Boolean,
-        stake: Double
+        stake: Double,
+        targetDigit: Int
     ): NextTradePreview {
         val def = SupportedMarkets.find(symbol)
-        val targetDigit = if (isRecovery) settings.recoveryDigit else settings.targetDigit
         val recoveryDir = settings.recoveryDirection
         val nextSymbol = SupportedMarkets.ALL.filter { it.symbol != symbol }.random().symbol
         val nextDef = SupportedMarkets.find(nextSymbol)
@@ -272,14 +316,15 @@ class TradingEngine(
         symbol: String,
         tradeType: TradeType,
         stake: Double,
-        preview: NextTradePreview
+        preview: NextTradePreview,
+        targetDigit: Int
     ): Boolean {
         val trading = deriv.ensureTrading() ?: return false
         val account = deriv.activeAccount ?: return false
         val kind = account.kind
 
-        // Build the digit contract.
-        val targetDigit = if (tradeType == TradeType.OVER_UNDER) settings.recoveryDigit else settings.targetDigit
+        // `targetDigit` was resolved by the caller and already accounts for random selection, so
+        // the barrier below is guaranteed to be the digit whose statistics were evaluated.
         val contractType = when {
             tradeType == TradeType.OVER_UNDER &&
                 settings.recoveryDirection.equals("OVER", ignoreCase = true) -> DerivContractType.DIGIT_OVER
