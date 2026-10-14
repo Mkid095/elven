@@ -108,6 +108,48 @@ class TradingEngine(
     private var executionJob: Job? = null
     private var confirmDeferred: CompletableDeferred<Boolean>? = null
     private var streakLossCount = 0
+
+    /**
+     * Money lost so far in the current losing streak, which is what recovery has to clear.
+     *
+     * Tracked as an amount rather than derived from `streakLossCount`: the count alone cannot size
+     * a recovery stake, because every rung carries a different stake.
+     */
+    private var recoveryOutstanding = 0.0
+
+    /**
+     * Stake needed to clear [recoveryOutstanding] and still bank the target profit.
+     *
+     * Replaces plain `stake * 2^n`. Doubling does not target anything — after a 1.00 loss it stakes
+     * 2.00 for a contract paying r, which recovers 2.00*r against a 1.00 hole and usually still
+     * falls short, while at a low payout ratio it wildly over-recovers and banks nothing extra.
+     * The ladder is now sized from the contract's own payout so a win genuinely ends the streak in
+     * profit.
+     *
+     * Falls back to the previous doubling behaviour if the plan cannot be built, so a configuration
+     * problem can never silently stop the engine from trading.
+     */
+    private fun recoveryStakeFor(settings: TradeSettings): Double {
+        val p = RecoveryCalculator.overUnderWinProbability(
+            barrier = settings.recoveryDigit,
+            isOver = settings.recoveryDirection.equals("OVER", ignoreCase = true)
+        )
+        val plan = runCatching {
+            RecoveryCalculator.plan(
+                baseStake = settings.stakeAmount,
+                lossesToRecover = recoveryOutstanding,
+                winProbability = p,
+                maxSteps = 1,
+                maxTotalRisk = Double.MAX_VALUE
+            )
+        }.getOrNull() ?: return settings.stakeAmount * Math.pow(2.0, streakLossCount.toDouble())
+
+        val stake = plan.steps.firstOrNull()?.stake ?: return settings.stakeAmount
+        // Guard against a degenerate stake: a plan asking for an absurd amount is a signal the
+        // recovery is not viable, not a licence to send it.
+        val ceiling = settings.stakeAmount * Math.pow(2.0, streakLossCount + 1)
+        return stake.coerceIn(settings.stakeAmount, ceiling.coerceAtLeast(settings.stakeAmount))
+    }
     private var lastTradedMarketSymbol = ""
     private var tradesOnCurrentMarket = 0
 
@@ -165,11 +207,7 @@ class TradingEngine(
                 }
 
                 val tradeType = if (isRecovery) TradeType.OVER_UNDER else TradeType.DIFFERS
-                val stake = if (isRecovery) {
-                    settings.stakeAmount * Math.pow(2.0, streakLossCount.toDouble())
-                } else {
-                    settings.stakeAmount
-                }
+                val stake = if (isRecovery) recoveryStakeFor(settings) else settings.stakeAmount
 
                 // Resolved BEFORE the condition is tested, and reused for the preview and the
                 // contract barrier. In RANDOM mode a draw that fails the threshold simply produces
@@ -485,10 +523,14 @@ class TradingEngine(
         // is committed even though the outcome is unknown.
         if (isWin) {
             streakLossCount = 0
+            recoveryOutstanding = 0.0
             _consecutiveLosses.value = 0
         } else {
             streakLossCount++
             _consecutiveLosses.value = streakLossCount
+            // The whole stake is at risk on a loss, not just the net, and an unsettled contract
+            // has already been paid for.
+            recoveryOutstanding += stake
             if (netResult < 0) _dailyLossAccumulated.update { it + (-netResult) }
         }
         _sessionProfit.update { it + netResult }
