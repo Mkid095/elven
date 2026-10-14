@@ -110,6 +110,7 @@ fun TickEdgeApp(
     val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
     val sessionSummary by viewModel.sessionSummary.collectAsStateWithLifecycle()
     val lastConfirmedTrade by viewModel.lastConfirmedTrade.collectAsStateWithLifecycle()
+    val scanState by viewModel.scanState.collectAsStateWithLifecycle()
 
     // Gate the authenticated experience on the real auth state
     if (authState !is com.tickedge.auth.AuthState.Authenticated) {
@@ -230,6 +231,7 @@ fun TickEdgeApp(
                 "trade" -> TradeScreen(
                     simulatorState = simulatorState,
                     activeTrade = activeTrade,
+                    scanState = scanState,
                     nextTrade = nextTrade,
                     consecutiveLosses = consecutiveLosses,
                     recentTradeOutcome = recentTradeOutcome,

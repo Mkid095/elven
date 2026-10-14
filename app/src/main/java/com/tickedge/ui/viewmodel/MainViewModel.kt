@@ -310,6 +310,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val dailyLoss = tradingEngine.dailyLossAccumulated
     val pendingConfirmation = tradingEngine.pendingConfirmation
 
+    /**
+     * What the engine is currently evaluating while scanning.
+     *
+     * Surfaced so a bot that is searching and finding nothing is visibly searching, rather than
+     * looking identical to one that has stopped.
+     */
+    val scanState = tradingEngine.scanState
+
     // Room flows (user-scoped via flatMapLatest on authState)
     val pastPositions: StateFlow<List<com.tickedge.data.local.SimulationPositionEntity>> =
         authState.flatMapLatest { state ->
@@ -645,7 +653,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // invisible to every session-scoped query.
         viewModelScope.launch {
             ensureProfile()
-            ensureSessionStarted()
+            // Session bookkeeping must never gate trading. This runs inside the same coroutine as
+            // startTrading(), so an unhandled throw here would kill the coroutine and the engine
+            // would never start — the UI would look like Start was pressed while nothing traded.
+            // Positions written without a session still land in the user-scoped history.
+            runCatching { ensureSessionStarted() }.onFailure { error ->
+                android.util.Log.e("MainViewModel", "Could not open a trading session; continuing without one", error)
+            }
             tradingEngine.startTrading(
                 settings = _tradeSettings.value,
                 config = _systemConfig.value,

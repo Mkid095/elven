@@ -65,6 +65,7 @@ import com.tickedge.data.model.TradeSettings
 import com.tickedge.data.model.TradeType
 import com.tickedge.domain.ActiveTradeState
 import com.tickedge.domain.NextTradePreview
+import com.tickedge.domain.ScanState
 import com.tickedge.domain.SimulatorState
 import com.tickedge.ui.components.CircularCountdown
 import com.tickedge.ui.theme.BorderDark
@@ -81,6 +82,7 @@ import java.util.Locale
 fun TradeScreen(
     simulatorState: SimulatorState,
     activeTrade: ActiveTradeState?,
+    scanState: ScanState = ScanState.Idle,
     nextTrade: NextTradePreview,
     consecutiveLosses: Int = 0,
     recentTradeOutcome: SimulatedTrade?,
@@ -217,6 +219,12 @@ fun TradeScreen(
                         }
                     }
                 }
+            }
+
+            // What the bot is aiming at right now. Always present, so a scanning bot is visibly
+            // scanning instead of showing a position card frozen at its last values.
+            item {
+                TargetMarketCard(scanState = scanState)
             }
 
             // Current Trade Live Card

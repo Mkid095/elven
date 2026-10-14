@@ -8,6 +8,8 @@ import com.tickedge.data.deriv.DerivContractType
 import com.tickedge.data.deriv.PlaceOrderPermit
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.SimulationPositionEntity
+import com.tickedge.data.model.AnalysisMetric
+import com.tickedge.data.model.ComparisonOperator
 import com.tickedge.data.model.DigitSelectionMode
 import java.util.concurrent.ConcurrentHashMap
 import com.tickedge.data.model.MarketState
@@ -219,12 +221,34 @@ class TradingEngine(
                 // Entry condition. Recovery trades must always execute to recover exposure, but a
                 // fresh Differs entry previously fired on a fixed 1.5s cadence regardless of the
                 // digit statistics — the threshold settings were recorded and never consulted.
-                if (!isRecovery && !entryConditionMet(settings, chosenSymbol, targetDigit, getMarketState)) {
-                    _simState.value = SimulatorState.SCANNING
-                    delay(POLL_INTERVAL_MS)
-                    continue
+                if (!isRecovery) {
+                    val check = evaluateEntry(settings, chosenSymbol, targetDigit, getMarketState)
+                    _scanState.value = ScanState(
+                        isScanning = true,
+                        symbol = chosenSymbol,
+                        targetDigit = targetDigit,
+                        observedPercent = check?.observedPercent,
+                        thresholdPercent = settings.thresholdPercent,
+                        isGreaterThan = settings.comparisonOperator ==
+                            ComparisonOperator.GREATER_THAN ||
+                            settings.comparisonOperator == ComparisonOperator.GREATER_OR_EQUAL,
+                        sampleSize = check?.sampleSize ?: 0,
+                        qualified = check?.qualifies ?: false,
+                        reason = when {
+                            check == null -> "no tick data yet for this market"
+                            check.sampleSize < MIN_SAMPLE_SIZE ->
+                                "needs $MIN_SAMPLE_SIZE ticks, has ${check.sampleSize}"
+                            else -> ""
+                        }
+                    )
+                    if (check?.qualifies != true) {
+                        _simState.value = SimulatorState.SCANNING
+                        delay(POLL_INTERVAL_MS)
+                        continue
+                    }
                 }
 
+                _scanState.value = ScanState.Idle
                 val preview = buildPreview(chosenSymbol, settings, tradeType, isRecovery, stake, targetDigit)
                 _nextTrade.value = preview
 
@@ -280,31 +304,37 @@ class TradingEngine(
         return lastRandomDigit.compute(symbol) { _, previous -> drawRandomDigit(previous) }!!
     }
 
-    private fun entryConditionMet(
+    private val _scanState = MutableStateFlow(ScanState.Idle)
+    val scanState: StateFlow<ScanState> = _scanState.asStateFlow()
+
+    /** Result of testing one market: the numbers behind the verdict, not just the verdict. */
+    private data class EntryCheck(
+        val qualifies: Boolean,
+        val observedPercent: Double,
+        val sampleSize: Int
+    )
+
+    private fun evaluateEntry(
         settings: TradeSettings,
         symbol: String,
         targetDigit: Int,
         getMarketState: (String) -> MarketState?
-    ): Boolean {
-        val state = getMarketState(symbol) ?: return false
-        if (state.digitFrequencies.none { it.digit == targetDigit }) return false
-
-        // The contract bought is DIGITDIFF, which wins when the final tick's last digit is NOT
-        // the target. Comparing the raw equals-% against the threshold therefore inverted the
-        // entry: it fired precisely when the target digit was over-represented and the contract
-        // was most likely to lose. Resolve the configured metric instead of assuming one.
+    ): EntryCheck? {
+        val state = getMarketState(symbol) ?: return null
+        if (state.digitFrequencies.none { it.digit == targetDigit }) return null
         val observedPercent = DigitAnalysisEngine.observedPercentFor(
             frequencies = state.digitFrequencies,
             targetDigit = targetDigit,
-            metric = settings.analysisMetric
+            metric = AnalysisMetric.DIFFERS_PERCENT
         )
-        return DigitAnalysisEngine.evaluateCondition(
+        val qualifies = DigitAnalysisEngine.evaluateCondition(
             observedPercent = observedPercent,
             thresholdPercent = settings.thresholdPercent,
             operator = settings.comparisonOperator,
             sampleSize = state.sampleSize,
             minimumSampleSize = MIN_SAMPLE_SIZE
         )
+        return EntryCheck(qualifies, observedPercent, state.sampleSize)
     }
 
     /**
@@ -614,6 +644,9 @@ class TradingEngine(
         _simState.value = SimulatorState.STOPPED
         _activeTrade.value = null
         _pendingConfirm.value = null
+        // Otherwise the card keeps showing the last market it was evaluating, which reads as
+        // "still working" after the user has stopped it.
+        _scanState.value = ScanState.Idle
     }
 
     fun resetDailyLoss() {
@@ -643,6 +676,28 @@ enum class SimulatorState {
     TRADE_IN_PROGRESS,
     WAITING_CONFIRMATION,
     STOPPED
+}
+
+/**
+ * What the engine is looking at right now, published on every poll.
+ *
+ * Without this the screen only ever showed a position once a trade had been placed, so a bot
+ * that was scanning and never qualifying was indistinguishable from one that had stopped.
+ */
+data class ScanState(
+    val isScanning: Boolean = false,
+    val symbol: String? = null,
+    val targetDigit: Int? = null,
+    val observedPercent: Double? = null,
+    val thresholdPercent: Double? = null,
+    val isGreaterThan: Boolean = true,
+    val sampleSize: Int = 0,
+    val qualified: Boolean = false,
+    val reason: String = ""
+) {
+    companion object {
+        val Idle = ScanState()
+    }
 }
 
 data class ActiveTradeState(
