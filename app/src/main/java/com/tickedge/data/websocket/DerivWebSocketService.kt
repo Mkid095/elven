@@ -158,7 +158,12 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
         reconnectJob = scope.launch(Dispatchers.Default) {
-            while (isActive && !isConnected && !manualClosed) {
+            // `!isConnecting` matters: connectWebSocket() is async, so isConnected stays false
+            // for the whole duration of an in-flight attempt. Without this guard the loop spins
+            // through several backoff steps while a single attempt is still pending, and each
+            // real failure burns several increments of reconnectAttempt. A transient DNS blip
+            // then ramps straight to the 30s ceiling instead of retrying in 3s and recovering.
+            while (isActive && !isConnected && !isConnecting && !manualClosed) {
                 reconnectAttempt++
                 val backoffMs = minOf(30_000L, 3_000L * reconnectAttempt)
                 delay(backoffMs + (0..1_000).random())
