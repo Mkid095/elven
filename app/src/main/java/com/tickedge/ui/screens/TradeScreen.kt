@@ -41,8 +41,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +56,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tickedge.data.model.AccountType
 import com.tickedge.data.model.SimulatedTrade
 import com.tickedge.data.model.SystemConfig
 import com.tickedge.data.model.TradeOutcome
@@ -65,9 +64,14 @@ import com.tickedge.data.model.TradeSettings
 import com.tickedge.data.model.TradeType
 import com.tickedge.domain.ActiveTradeState
 import com.tickedge.domain.NextTradePreview
+import com.tickedge.domain.PARITY_EVEN_SENTINEL
 import com.tickedge.domain.ScanState
+import com.tickedge.domain.StopNotice
+import com.tickedge.domain.StrategyDefinition
 import com.tickedge.domain.SimulatorState
+import com.tickedge.ui.components.BalanceSyncChip
 import com.tickedge.ui.components.CircularCountdown
+import com.tickedge.ui.components.LiveRiskDialog
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.StatGreen
 import com.tickedge.ui.theme.StatRed
@@ -80,15 +84,27 @@ import java.util.Locale
 
 @Composable
 fun TradeScreen(
+    strategy: StrategyDefinition,
     simulatorState: SimulatorState,
     activeTrade: ActiveTradeState?,
     scanState: ScanState = ScanState.Idle,
+    /**
+     * Why the bot halted, or null while it is running.
+     *
+     * Distinct from a user pressing Stop: a self-imposed halt on a risk limit is a guardrail
+     * working, and the page should say so rather than looking broken.
+     */
+    stopNotice: StopNotice? = null,
+    onDismissStopNotice: () -> Unit = {},
     nextTrade: NextTradePreview,
     consecutiveLosses: Int = 0,
     recentTradeOutcome: SimulatedTrade?,
     tradeSettings: TradeSettings,
     systemConfig: SystemConfig,
     activeAccount: com.tickedge.data.deriv.DerivAccount? = null,
+    isBalanceLive: Boolean = false,
+    isSyncing: Boolean = false,
+    onSyncBalances: () -> Unit = {},
     realArmed: Boolean = false,
     pendingConfirmation: NextTradePreview? = null,
     onStartTrading: () -> Unit,
@@ -98,7 +114,24 @@ fun TradeScreen(
     onNavigateToHistory: () -> Unit,
     onDismissOutcomeBanner: () -> Unit,
     onConfirmOrder: (Boolean) -> Unit = {},
-    onToggleRealArmed: (Boolean) -> Unit = {},
+    onSwitchAccount: (AccountType) -> Unit = {},
+    /**
+     * Whether the one-time live-account warning is on screen.
+     *
+     * Replaces the per-order confirmation that used to fire on every live trade. Arming live asks
+     * once; after that the session places its orders without interrupting.
+     */
+    showLiveRiskDialog: Boolean = false,
+    onAcceptLiveRisk: () -> Unit = {},
+    onDeclineLiveRisk: () -> Unit = {},
+    /**
+     * What the balance cannot cover, checked before the user presses Start.
+     *
+     * Shown rather than enforced: the user may still choose to trade a base stake with no ladder
+     * behind it. What matters is that the gap is stated before the first order, not discovered on
+     * the rung where the loss can no longer be chased.
+     */
+    preflightWarning: String? = null,
     modifier: Modifier = Modifier
 ) {
     var showSystemConfigSheet by remember { mutableStateOf(false) }
@@ -112,6 +145,17 @@ fun TradeScreen(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
+        // The one-time live-account warning, drawn over everything. It has to be modal: arming live
+        // is the moment the money changes character, and a banner the user can scroll past while
+        // the bot is already placing orders is not a decision point.
+        if (showLiveRiskDialog) {
+            LiveRiskDialog(
+                onAccept = onAcceptLiveRisk,
+                onDecline = onDeclineLiveRisk,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -129,13 +173,13 @@ fun TradeScreen(
                 ) {
                     Column {
                         Text(
-                            text = "Live Trading",
+                            text = "Live Trading · ${strategy.name}",
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Text(
-                            text = "Paper-Trading Simulator (Automated Execution)",
+                            text = strategy.tagline,
                             fontSize = 11.sp,
                             color = TextSecondary
                         )
@@ -156,9 +200,55 @@ fun TradeScreen(
                 }
             }
 
-            // Account & real-trading safety
+            // Why the bot stopped, when it stopped itself. Placed immediately under the header and
+            // above the account card, because a bot halted on its stop loss is the single most
+            // important thing on this page — and it used to simply go quiet, which is
+            // indistinguishable from a crash and left the user with no idea their money had stopped
+            // moving for a reason.
+            stopNotice?.let { notice ->
+                item {
+                    StopBanner(
+                        title = notice.title,
+                        detail = notice.detail,
+                        onDismiss = onDismissStopNotice
+                    )
+                }
+            }
+
+            // Balance the account cannot cover, stated before Start rather than discovered by a
+            // failed order. Sits above the account card because it is about whether trading is
+            // possible on that account at all.
+            preflightWarning?.let { warning ->
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF2A1418), RoundedCornerShape(12.dp))
+                            .border(1.dp, StatRed, RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                            .testTag("preflight_warning"),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Text(
+                            text = warning,
+                            fontSize = 12.sp,
+                            color = TextPrimary
+                        )
+                    }
+                }
+            }
+
+            // Account, the switch between accounts, and the position currently on the book.
+            //
+            // The position lives *inside* this card rather than in a card of its own because a
+            // position is a property of the account it was placed on. Split across two cards it read
+            // as a separate fact about the bot, and it was free to keep showing the previous
+            // trade's market and digit after that trade had closed.
             item {
                 val isReal = activeAccount?.kind == com.tickedge.data.deriv.DerivAccountKind.REAL
+                // A contract is live. Switching accounts now would settle the next trade on a
+                // different balance than the ladder was sized against, so the control is locked.
+                val tradeOpen = simulatorState == SimulatorState.TRADE_IN_PROGRESS && activeTrade != null
                 Card(
                     colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
                     shape = RoundedCornerShape(14.dp),
@@ -179,6 +269,29 @@ fun TradeScreen(
                                     fontWeight = FontWeight.Bold,
                                     color = TextPrimary
                                 )
+                                // This is the page that spends the money, so the balance and its
+                                // freshness belong here too — not only on home.
+                                activeAccount?.balance?.let {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = String.format(
+                                                java.util.Locale.US, "$%.2f", it
+                                            ),
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = VividYellow
+                                        )
+                                        BalanceSyncChip(
+                                            isLive = isBalanceLive,
+                                            isSyncing = isSyncing,
+                                            onSync = onSyncBalances
+                                        )
+                                    }
+                                }
                             }
                             Box(
                                 modifier = Modifier
@@ -197,26 +310,68 @@ fun TradeScreen(
                                 )
                             }
                         }
+                        // Account switcher.
+                        //
+                        // This replaces a switch that could never be turned on: it was disabled
+                        // unless the *current* account was already live, which meant the only state
+                        // in which it was enabled was the state you could only reach by turning it
+                        // on. Selecting Live here both moves the money and arms real-money orders —
+                        // one control, one meaning — and it stays locked while a contract is open.
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color(0xFF12141C), RoundedCornerShape(10.dp))
+                                .border(1.dp, BorderDark, RoundedCornerShape(10.dp))
+                                .padding(3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
+                            listOf(AccountType.DEMO, AccountType.LIVE).forEach { type ->
+                                val selected = (type == AccountType.LIVE) == realArmed
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (selected) VividYellow else Color.Transparent)
+                                        .clickable(enabled = !tradeOpen) { onSwitchAccount(type) }
+                                        .padding(vertical = 7.dp)
+                                        .testTag("account_switch_${type.name.lowercase()}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = if (type == AccountType.DEMO) "Demo account" else "Live account",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when {
+                                            selected -> Color(0xFF101216)
+                                            tradeOpen -> TextSecondary.copy(alpha = 0.4f)
+                                            else -> TextSecondary
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        if (tradeOpen) {
                             Text(
-                                text = "Allow real-money orders (live account)",
-                                fontSize = 12.sp,
+                                text = "A contract is open — stop the bot before switching accounts.",
+                                fontSize = 11.sp,
                                 color = TextSecondary
                             )
-                            Switch(
-                                checked = realArmed,
-                                onCheckedChange = onToggleRealArmed,
-                                enabled = isReal,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color(0xFF101216),
-                                    checkedTrackColor = StatRed
-                                )
-                            )
                         }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(BorderDark)
+                        )
+
+                        PositionDetail(
+                            strategy = strategy,
+                            activeTrade = activeTrade,
+                            simulatorState = simulatorState,
+                            tradeSettings = tradeSettings
+                        )
                     }
                 }
             }
@@ -225,65 +380,6 @@ fun TradeScreen(
             // scanning instead of showing a position card frozen at its last values.
             item {
                 TargetMarketCard(scanState = scanState)
-            }
-
-            // Current Trade Live Card
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                    shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Current Position",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = VividYellow
-                            )
-                            Text(
-                                text = "Duration: ${tradeSettings.durationValue} ${tradeSettings.durationUnit.label.lowercase()} (1 tick = 2s)",
-                                fontSize = 11.sp,
-                                color = TextSecondary
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        val isRecovery = activeTrade?.isRecoveryMode == true || consecutiveLosses > 0
-                        val displayMarket = activeTrade?.marketName ?: "Volatility 25"
-                        val displayType = if (isRecovery) {
-                            "Over & Under (${activeTrade?.recoveryDirection ?: tradeSettings.recoveryDirection} ${activeTrade?.targetDigit ?: tradeSettings.recoveryDigit}) [Recovery Step $consecutiveLosses]"
-                        } else {
-                            "Differs (≠ ${activeTrade?.targetDigit ?: tradeSettings.targetDigit}) [Base]"
-                        }
-                        val displayDigit = activeTrade?.targetDigit ?: (if (isRecovery) tradeSettings.recoveryDigit else tradeSettings.targetDigit)
-                        val displayStake = activeTrade?.currentStake ?: (if (isRecovery) tradeSettings.stakeAmount * Math.pow(2.0, consecutiveLosses.toDouble()) else tradeSettings.stakeAmount)
-                        val displayStatus = if (simulatorState == SimulatorState.TRADE_IN_PROGRESS) {
-                            activeTrade?.statusText ?: "Active"
-                        } else if (simulatorState == SimulatorState.SCANNING) {
-                            "Scanning condition (${tradeSettings.comparisonOperator.symbol} ${tradeSettings.thresholdPercent}%)..."
-                        } else {
-                            "Bot Idle (Ready to start)"
-                        }
-
-                        TradeInfoRow(label = "Market:", value = displayMarket)
-                        TradeInfoRow(label = "Contract Mode:", value = displayType, valueColor = if (isRecovery) VividYellow else TextPrimary)
-                        TradeInfoRow(label = "Target Number:", value = "$displayDigit")
-                        TradeInfoRow(label = "Simulated Stake:", value = String.format(Locale.US, "$ %.2f", displayStake))
-                        TradeInfoRow(
-                            label = "Status:",
-                            value = displayStatus,
-                            valueColor = if (simulatorState == SimulatorState.TRADE_IN_PROGRESS) VividYellow else TextSecondary
-                        )
-                    }
-                }
             }
 
             // Circular Countdown & Embedded Outcome Clock
@@ -306,152 +402,15 @@ fun TradeScreen(
                 }
             }
 
-            // DYNAMIC MARTINGALE RECOVERY FLOW CARD
+            // One compact card for "what the bot is doing next", replacing the two cards it used
+            // to be — the recovery flow card and the next-trade card. Same information, one place,
+            // so the page reads as a status rather than three overlapping dashboards.
             item {
-                val isCurrentlyRecovery = activeTrade?.isRecoveryMode == true || consecutiveLosses > 0
-                val activeStake = activeTrade?.currentStake ?: (if (isCurrentlyRecovery) tradeSettings.stakeAmount * Math.pow(2.0, consecutiveLosses.toDouble()) else tradeSettings.stakeAmount)
-                val nextStakeOnLoss = activeStake * 2.0
+                val nextStakeOnLoss = nextTrade.ifLossNextStake
 
                 Card(
                     colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
                     shape = RoundedCornerShape(16.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isCurrentlyRecovery) VividYellow else BorderDark),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Sync,
-                                    contentDescription = null,
-                                    tint = VividYellow,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    text = "Martingale Dynamic Flow",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = VividYellow
-                                )
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .background(if (isCurrentlyRecovery) VividYellow else Color(0xFF1D2636), RoundedCornerShape(6.dp))
-                                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    text = if (isCurrentlyRecovery) "IN RECOVERY (STEP $consecutiveLosses)" else "BASE MODE (DIFFERS)",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isCurrentlyRecovery) Color(0xFF101216) else StatGreen
-                                )
-                            }
-                        }
-
-                        // Flow Outcome 1: IF WIN
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF0F2618), RoundedCornerShape(10.dp))
-                                .border(1.dp, StatGreen, RoundedCornerShape(10.dp))
-                                .padding(10.dp)
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "✓ IF WIN:",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = StatGreen
-                                    )
-                                    Text(
-                                        text = if (isCurrentlyRecovery) {
-                                            "ROLL BACK TO DIFFERS"
-                                        } else {
-                                            "CONTINUES ON BASE DIFFERS"
-                                        },
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = VividYellow
-                                    )
-                                }
-                                Text(
-                                    text = if (isCurrentlyRecovery) {
-                                        "Win Payout: $${String.format(Locale.US, "%.2f", activeStake * 1.95)} (Net profit: +$${String.format(Locale.US, "%.2f", activeStake * 0.95)}). All previous losses restored! Next contract rolls back to base Differs stake ($${String.format(Locale.US, "%.2f", tradeSettings.stakeAmount)})."
-                                    } else {
-                                        "Win Payout: $${String.format(Locale.US, "%.2f", activeStake * 1.10)} (Net profit: +$${String.format(Locale.US, "%.2f", activeStake * 0.10)}). Proceeds with safe base Differs."
-                                    },
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp,
-                                    color = Color(0xFFD4E6D9)
-                                )
-                            }
-                        }
-
-                        // Flow Outcome 2: IF LOSS
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF281316), RoundedCornerShape(10.dp))
-                                .border(1.dp, StatRed, RoundedCornerShape(10.dp))
-                                .padding(10.dp)
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = "✗ IF LOSS:",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = StatRed
-                                    )
-                                    Text(
-                                        text = if (isCurrentlyRecovery) {
-                                            "NEXT STAKE: $${String.format(Locale.US, "%.2f", nextStakeOnLoss)} (STEP ${consecutiveLosses + 1})"
-                                        } else {
-                                            "NEXT STAKE: $${String.format(Locale.US, "%.2f", nextStakeOnLoss)} (SWITCHES TO RECOVERY)"
-                                        },
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = VividYellow
-                                    )
-                                }
-                                Text(
-                                    text = if (isCurrentlyRecovery) {
-                                        "Continues Martingale on ${tradeSettings.recoveryDirection} ${tradeSettings.recoveryDigit} with double stake ($${String.format(Locale.US, "%.2f", nextStakeOnLoss)}) to guarantee full capital recovery on next win."
-                                    } else {
-                                        "Differs loss detected. Automator switches immediately to Over & Under (${tradeSettings.recoveryDirection} ${tradeSettings.recoveryDigit}) with 2x stake ($${String.format(Locale.US, "%.2f", nextStakeOnLoss)}) to quickly recoup the lost stake."
-                                    },
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp,
-                                    color = Color(0xFFEBC7CB)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Next Trade Preview Card
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141720)),
-                    shape = RoundedCornerShape(14.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -465,24 +424,31 @@ fun TradeScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Next Trade Setup",
+                                text = "Next trade",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = TextSecondary
                             )
                             Text(
-                                text = String.format(Locale.US, "Stake: $%.2f", nextTrade.stake),
+                                text = String.format(Locale.US, "Stake $%.2f", nextTrade.stake),
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = VividYellow
+                                color = TextPrimary
                             )
                         }
 
                         Text(
-                            text = if (nextTrade.isRecovery) {
-                                "Over & Under (${nextTrade.recoveryDirection} ${nextTrade.targetDigit}) [Recovery Step ${nextTrade.recoveryStep}]"
-                            } else {
-                                "Differs (≠ ${nextTrade.targetDigit}) [Base]"
+                            text = when (nextTrade.tradeType) {
+                                TradeType.EVEN_ODD -> {
+                                    val side =
+                                        if (nextTrade.targetDigit == PARITY_EVEN_SENTINEL) "Even" else "Odd"
+                                    "Even / Odd ($side)" +
+                                        if (nextTrade.isRecovery) ", recovery step ${nextTrade.recoveryStep}" else ""
+                                }
+                                TradeType.OVER_UNDER ->
+                                    "Over & Under (${nextTrade.recoveryDirection} ${nextTrade.targetDigit}), " +
+                                        "recovery step ${nextTrade.recoveryStep}"
+                                else -> "Differs (≠ ${nextTrade.targetDigit})"
                             },
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
@@ -494,12 +460,15 @@ fun TradeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                text = "Market: ${nextTrade.marketName}",
+                                text = nextTrade.marketName,
                                 fontSize = 12.sp,
                                 color = TextSecondary
                             )
                             Text(
-                                text = "Potential Win: +$${String.format(Locale.US, "%.2f", nextTrade.ifWinNet)}",
+                                text = if (nextTrade.livePayout)
+                                    "Win $${String.format(Locale.US, "%.2f", nextTrade.ifWinNet)}"
+                                else
+                                    "Win per Deriv's live quote",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = StatGreen
@@ -507,7 +476,8 @@ fun TradeScreen(
                         }
 
                         Text(
-                            text = "If Loss: ${nextTrade.ifLossAction} ($${String.format(Locale.US, "%.2f", nextTrade.ifLossNextStake)})",
+                            text = "If it loses: " + nextTrade.ifLossAction + " → next stake " +
+                                String.format(Locale.US, "$%.2f", nextStakeOnLoss),
                             fontSize = 11.sp,
                             color = TextSecondary
                         )
@@ -672,10 +642,15 @@ fun TradeScreen(
             ) {
                 Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(text = "Confirm Real Order", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = StatRed)
+                    val payoutNote = if (pc.livePayout)
+                        " · live payout $" + String.format(Locale.US, "%.2f", pc.winPayout) + " (profit +$" + String.format(Locale.US, "%.2f", pc.ifWinNet)
+                    else
+                        " · live payout at order"
                     Text(
                         text = "Place a real order on " + (activeAccount?.id ?: "account") + ". " +
-                            "Stake $" + String.format(Locale.US, "%.2f", pc.stake) + ". " + pc.ifWinAction + ". " +
-                            "If Loss: " + pc.ifLossAction + ".",
+                            "Stake $" + String.format(Locale.US, "%.2f", pc.stake) + payoutNote +
+                            ". " + pc.ifWinAction + ". " +
+                            "If Loss: " + pc.ifLossAction + " → next stake $" + String.format(Locale.US, "%.2f", pc.ifLossNextStake) + ".",
                         fontSize = 13.sp,
                         color = TextSecondary,
                         lineHeight = 18.sp
@@ -709,6 +684,142 @@ fun TradeScreen(
                 onSaveSystemConfig(updated)
                 showSystemConfigSheet = false
             }
+        )
+    }
+}
+
+/**
+ * The position currently on the book, inside the account card.
+ *
+ * Every figure is read from the open contract. There is deliberately **no fallback**: with no
+ * contract open the block says so and shows nothing else. It used to fall back to the *settings*'
+ * market and digit whenever [activeTrade] was null, which is how a scanning bot came to display
+ * "Volatility 25 / Differs / 2" — numbers that were never a position at all, that no contract
+ * carried, and that happened to match the digit the UI highlighted elsewhere, making an invented
+ * position look like a confirmed one.
+ *
+ * When a contract *is* open, the recovery rung it sits on is stated rather than implied, because
+ * the same market and digit mean different things at different rungs of the ladder.
+ */
+@Composable
+private fun PositionDetail(
+    strategy: StrategyDefinition,
+    activeTrade: ActiveTradeState?,
+    simulatorState: SimulatorState,
+    tradeSettings: TradeSettings,
+    modifier: Modifier = Modifier
+) {
+    val isParity = strategy.id == com.tickedge.domain.StrategyCatalog.EVEN_ODD.id
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "Current Position", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = VividYellow)
+            Text(
+                text = "Duration: ${tradeSettings.durationValue} " +
+                    "${tradeSettings.durationUnit.label.lowercase()} (1 tick = 2s)",
+                fontSize = 11.sp,
+                color = TextSecondary
+            )
+        }
+
+        val trade = activeTrade
+        if (trade == null) {
+            Text(
+                text = when (simulatorState) {
+                    SimulatorState.SCANNING -> if (isParity) {
+                        "No position open — scanning Even / Odd " +
+                            "${tradeSettings.evenOddOperator.symbol} " +
+                            "${tradeSettings.evenOddThreshold}% across the markets."
+                    } else {
+                        "No position open — scanning ${tradeSettings.comparisonOperator.symbol} " +
+                            "${tradeSettings.thresholdPercent}% across the markets."
+                    }
+                    else -> "No position open. Press Start to begin trading."
+                },
+                fontSize = 12.sp,
+                color = TextSecondary,
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+            return@Column
+        }
+
+        val mode = when {
+            isParity -> {
+                val side =
+                    if (trade.targetDigit == PARITY_EVEN_SENTINEL) "Even" else "Odd"
+                "Even / Odd ($side)" +
+                    if (trade.isRecoveryMode) " [Recovery rung ${trade.recoveryStep}]" else " [Base]"
+            }
+            trade.isRecoveryMode ->
+                "Over & Under (${trade.recoveryDirection} ${trade.targetDigit}) [Recovery rung ${trade.recoveryStep}]"
+            else -> "Differs (≠ ${trade.targetDigit}) [Base]"
+        }
+
+        TradeInfoRow(label = "Market:", value = trade.marketName)
+        TradeInfoRow(
+            label = "Contract Mode:",
+            value = mode,
+            valueColor = if (trade.isRecoveryMode) VividYellow else TextPrimary
+        )
+        TradeInfoRow(label = "Target Number:", value = trade.targetDigit.toString())
+        TradeInfoRow(label = "Stake:", value = String.format(Locale.US, "$ %.2f", trade.currentStake))
+        TradeInfoRow(label = "Status:", value = trade.statusText, valueColor = VividYellow)
+    }
+}
+
+/**
+ * The banner shown when the bot halts itself.
+ *
+ * Amber rather than red: hitting a stop loss or a daily limit is the system working as configured,
+ * not a fault, and painting it as an error trains the user to ignore it. Red is reserved for the
+ * blocked-order case, where something genuinely did not work.
+ *
+ * Deliberately not dismissible by tapping the background. It carries the reason the user's money
+ * stopped moving, so it stays until they have read it or explicitly clear it — a banner that
+ * vanishes on a stray scroll hides the one thing this page needs to say.
+ */
+@Composable
+private fun StopBanner(
+    title: String,
+    detail: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val tint = VividYellow
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp)
+            .background(Color(0xFF2A2312), RoundedCornerShape(12.dp))
+            .border(1.dp, tint.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag("stop_banner"),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = tint
+            )
+            Text(
+                text = detail,
+                fontSize = 11.sp,
+                lineHeight = 16.sp,
+                color = TextPrimary,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        IconButtonBox(
+            icon = Icons.Default.Close,
+            contentDesc = "Dismiss",
+            onClick = onDismiss
         )
     }
 }

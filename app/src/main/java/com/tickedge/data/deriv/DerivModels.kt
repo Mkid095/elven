@@ -15,11 +15,21 @@ data class DerivAccount(
         get() = if (kind == DerivAccountKind.DEMO) "Demo Account" else "Live Account"
 }
 
-/** Deriv options contract types used by the strategy (V1 options contract_type codes). */
+/** Deriv options contract types used by the strategies (V1 options contract_type codes). */
 enum class DerivContractType(val code: String, val label: String) {
     DIGIT_DIFFERS("DIGITDIFF", "Digit Differs"),
     DIGIT_OVER("DIGITOVER", "Digits Over"),
-    DIGIT_UNDER("DIGITUNDER", "Digits Under")
+    DIGIT_UNDER("DIGITUNDER", "Digits Under"),
+    /**
+     * Wins when the last digit of the final tick is even ({0,2,4,6,8}). No digit barrier:
+     * [DerivContractParams.barrier] is ignored for this type, so callers pass 0.
+     */
+    DIGIT_EVEN("DIGITEVEN", "Digit Even"),
+    /**
+     * Wins when the last digit of the final tick is odd ({1,3,5,7,9}). No digit barrier, same
+     * convention as [DIGIT_EVEN].
+     */
+    DIGIT_ODD("DIGITODD", "Digit Odd")
 }
 
 /** Parameters for a digit contract. Maps 1:1 to the V3-sibling `proposal` request fields. */

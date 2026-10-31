@@ -78,7 +78,7 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
                 shortName = def.shortName,
                 connectionStatus = ConnectionStatus.CONNECTING,
                 pipSize = def.pipSize,
-                configuredWindowSize = 30
+                configuredWindowSize = DEFAULT_WINDOW_SIZE
             )
         }
     )
@@ -87,7 +87,24 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
     private val _overallConnection = MutableStateFlow(ConnectionStatus.CONNECTING)
     val overallConnection: StateFlow<ConnectionStatus> = _overallConnection.asStateFlow()
 
-    private var currentWindowSize = 30
+    /**
+     * Window in force until a caller applies the user's setting.
+     *
+     * This used to be 30, matching nothing else in the app: `TradeSettings.analysisWindowSize`,
+     * `UserSettingsEntity.windowSize` and the Room migration all default to 100. Because
+     * `loadPersistedSettings` only called `setWindowSize` from inside an `e?.let`, a fresh install
+     * — which has no settings row at all — kept this value forever while every screen and the
+     * database claimed 100. The two defaults never met.
+     *
+     * Single constant now, and it matches the persisted default, so a device with no saved
+     * settings analyses the same window as one that has.
+     */
+    private var currentWindowSize = DEFAULT_WINDOW_SIZE
+
+    /** Must stay equal to `UserSettingsEntity.windowSize`'s default; see [currentWindowSize]. */
+    private companion object {
+        const val DEFAULT_WINDOW_SIZE = 100
+    }
 
     /** Maximum ticks retained per market — also the history depth requested on subscribe. */
     private val MAX_TICKS = 1000
@@ -127,7 +144,13 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
                 isConnecting = false
                 reconnectAttempt = 0
                 _overallConnection.value = ConnectionStatus.LOADING_HISTORY
-                releaseSubscriptions()
+                // A fresh socket has nothing to unsubscribe from. The ids still in `subscriptions`
+                // belong to the connection that just died, so forgetting them here sent five
+                // frames the new socket cannot act on -- and Deriv answered each one with a
+                // `forget` frame, which then surfaced as "Unhandled msg_type=forget" on every
+                // single reconnect. The stale ids are simply dropped; the new subscriptions
+                // replace them a moment later.
+                subscriptions.clear()
                 SupportedMarkets.ALL.forEach { def -> subscribeMarket(webSocket, def.symbol) }
             }
 
@@ -136,7 +159,13 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(tag, "Public WS failure: ${t.message}")
+                // `t.message` was logged alone and printed "null" for every drop, throwing away the only clue
+                // available. The type plus the HTTP response tells a reset apart from a rejected
+                // handshake, which is the difference between "retry the network" and "fix the URL".
+                Log.w(
+                    tag,
+                    "Public WS failure: ${t::class.java.simpleName}: ${t.message} (http=${response?.code})"
+                )
                 isConnected = false
                 isConnecting = false
                 markAll(ConnectionStatus.RECONNECTING)
@@ -230,8 +259,36 @@ class DerivWebSocketService(private val scope: CoroutineScope) {
             // with no ticks ever arriving the displayed price simply froze, reading as "stale
             // or simulated data" with nothing to indicate a fault.
             "error" -> handleError(json)
-            "ping" -> Unit // keepalive; nothing to do
+            "ping" -> handlePing(json)
+            // A `forget` frame is the acknowledgement of an unsubscribe, not a fault. It is no
+            // longer expected now that stale ids are dropped rather than forgotten, but treating
+            // it as unknown would turn a normal acknowledgement into a warning.
+            "forget" -> Unit
             else -> Log.d(tag, "Unhandled Deriv msg_type=$msgType")
+        }
+    }
+
+    /**
+     * Answer the server's keepalive.
+     *
+     * The endpoint sends `{"msg_type":"ping","ping":"pong"}` and expects a reply carrying the
+     * same token. This branch used to be `Unit` — the ping was received and silently discarded.
+     *
+     * The token is echoed back rather than hard-coded to "pong", so if Deriv ever sends a
+     * different value the reply still matches what the server asked for.
+     *
+     * NOTE: this is a fix by protocol compliance, not one proven to cure the ~2-minute reconnect
+     * cycle seen in the device logs — that cadence is a hypothesis until the socket survives a
+     * longer window. The failure is still logged with its throwable, so it stays diagnosable.
+     */
+    private fun handlePing(json: JSONObject) {
+        try {
+            webSocket?.send(JSONObject().apply {
+                put("pong", json.optString("ping", "pong"))
+                put("req_id", reqSeq.incrementAndGet())
+            }.toString())
+        } catch (e: Exception) {
+            Log.w(tag, "Could not answer ping: ${e.message}")
         }
     }
 

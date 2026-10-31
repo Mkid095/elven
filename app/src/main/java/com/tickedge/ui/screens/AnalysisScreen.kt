@@ -36,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +54,7 @@ import com.tickedge.data.model.MarketState
 import com.tickedge.data.model.OverUnderStats
 import com.tickedge.data.model.SupportedMarkets
 import com.tickedge.domain.DigitAnalysisEngine
+import com.tickedge.domain.StrategyCatalog
 import com.tickedge.ui.components.ConnectionBadge
 import com.tickedge.ui.components.DigitFrequencyRow
 import com.tickedge.ui.theme.BorderDark
@@ -67,13 +69,21 @@ import java.util.Locale
 /** Tab identifiers, kept as constants so the label and the branch cannot drift apart. */
 private const val DIFFERS_TAB = "Differs Analysis"
 private const val OVER_UNDER_TAB = "Over & Under Analysis"
+private const val EVEN_ODD_TAB = "Even/Odd"
 
+/**
+ * Analysis screen, gated by the active strategy.
+ *
+ * Differs shows its own two tabs — Differs and Over/Under (Over/Under belongs to Differs as its
+ * recovery analysis). Even/Odd shows only the Even/Odd tab: the digits 0-9, each labelled
+ * even/odd, and a tapped digit's per-market breakdown across all five markets.
+ */
 @Composable
 fun AnalysisScreen(
     marketsState: Map<String, MarketState>,
     selectedSymbol: String,
-    targetDigit: Int,
     inspectedDigit: Int?,
+    strategyId: String,
     onMarketSelected: (String) -> Unit,
     onDigitSelected: (Int) -> Unit,
     onWindowSizeChanged: (Int) -> Unit,
@@ -85,12 +95,28 @@ fun AnalysisScreen(
         shortName = "Market"
     )
 
-    // Subtabs: "Differs Analysis" (Matches/Differs per digit) vs "Over & Under Analysis"
-    var currentTab by remember { mutableStateOf(DIFFERS_TAB) }
+    val isEvenOddStrategy = strategyId == StrategyCatalog.EVEN_ODD.id
+    val tabs = if (isEvenOddStrategy) {
+        listOf(EVEN_ODD_TAB)
+    } else {
+        listOf(DIFFERS_TAB, OVER_UNDER_TAB)
+    }
 
-    // Which row of the distribution table is highlighted: whatever the user last tapped, or the
-    // configured target digit on first open.
-    val selectedDigit = inspectedDigit ?: targetDigit
+    // Subtabs: which analysis this strategy offers. The default is the strategy's first tab.
+    var currentTab by remember(strategyId) {
+        mutableStateOf(if (isEvenOddStrategy) EVEN_ODD_TAB else DIFFERS_TAB)
+    }
+    LaunchedEffect(strategyId) { currentTab = tabs.first() }
+
+    // Which row of the distribution table is highlighted — **only** what the user tapped.
+    //
+    // It used to fall back to `tradeSettings.targetDigit`, which meant a digit was highlighted
+    // before the user had chosen anything. That digit was a *default setting*, not a decision, and
+    // in random mode — the default — the engine picks a fresh digit for every trade and targets
+    // nothing in particular. A permanently highlighted digit therefore read as "this is what we are
+    // trading", on a screen that has nothing to do with what is about to be traded. Nothing is
+    // highlighted until it is asked for.
+    val selectedDigit = inspectedDigit
 
     // Toggle inside Over & Under Analysis: "All", "Over (>)", "Under (<)"
     var overUnderFilter by remember { mutableStateOf("All") }
@@ -132,7 +158,7 @@ fun AnalysisScreen(
             }
         }
 
-        // Subtabs: Differs Analysis vs Over & Under Analysis
+        // Subtabs: only the analysis the active strategy offers.
         item {
             Row(
                 modifier = Modifier
@@ -140,7 +166,7 @@ fun AnalysisScreen(
                     .background(SurfaceDarkCard, RoundedCornerShape(12.dp))
                     .padding(4.dp)
             ) {
-                listOf(DIFFERS_TAB, OVER_UNDER_TAB).forEach { tab ->
+                tabs.forEach { tab ->
                     val isSelected = currentTab == tab
                     Box(
                         modifier = Modifier
@@ -348,11 +374,11 @@ fun AnalysisScreen(
             }
         }
 
-        // ================= TAB 1: DIFFERS ANALYSIS (DIGIT DISTRIBUTION) =================
+        // ================= DIFFERS ANALYSIS (DIGIT DISTRIBUTION) — Differs strategy only =================
         //
         // No single-digit headline: the table below already carries a Differs % column for all ten
         // digits, so a banner for one of them repeated a row rather than adding anything.
-        if (currentTab == DIFFERS_TAB) {
+        if (!isEvenOddStrategy && currentTab == DIFFERS_TAB) {
             item {
                 Text(
                     text = "Digit Distribution",
@@ -363,38 +389,51 @@ fun AnalysisScreen(
             }
 
             item {
+                // The header mirrors [DigitFrequencyRow] column by column: same widths, same
+                // spacers, same order. Previously it had its own numbers, so the two disagreed
+                // and the last two columns — the ones with the longest labels — wrapped onto
+                // two lines.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(text = "Digit", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(30.dp))
-                    Text(text = "Matches Bar", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.weight(1f))
+                    Box(modifier = Modifier.size(30.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "Match",
-                        fontSize = 12.sp,
+                        text = "Bar",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "Count",
+                        fontSize = 11.sp,
                         color = TextSecondary,
                         modifier = Modifier.width(28.dp),
                         textAlign = TextAlign.End
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Match %",
-                        fontSize = 12.sp,
+                        text = "Match%",
+                        fontSize = 11.sp,
                         color = TextSecondary,
                         modifier = Modifier.width(42.dp),
                         textAlign = TextAlign.End
                     )
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Differs %",
-                        fontSize = 12.sp,
+                        text = "Differs%",
+                        fontSize = 11.sp,
                         color = StatGreen,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.width(52.dp),
                         textAlign = TextAlign.End
                     )
-                    Text(text = "Trend", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(14.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Box(modifier = Modifier.width(14.dp).height(14.dp))
                 }
             }
 
@@ -461,8 +500,188 @@ fun AnalysisScreen(
             }
         }
 
-        // ================= TAB 2: OVER & UNDER ANALYSIS =================
-        if (currentTab == "Over & Under Analysis") {
+        // ================= EVEN / ODD ANALYSIS — Even/Odd strategy only =================
+        //
+        // The whole parity read on one screen: which side of the last digit is running hot over
+        // the selected market's window, and — when the user taps a digit in the list below — how
+        // often that digit has appeared in *each* of the five markets. Every market state carries
+        // its own digitFrequencies, so the breakdown needs no new engine work.
+        if (isEvenOddStrategy && currentTab == EVEN_ODD_TAB) {
+            val evenPct = DigitAnalysisEngine.evenPercentFor(currentMarket.digitFrequencies)
+            val oddPct = DigitAnalysisEngine.oddPercentFor(currentMarket.digitFrequencies)
+            val hotIsEven = evenPct >= oddPct
+
+            item {
+                Text(
+                    text = "Even / Odd · ${currentMarket.shortName}",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary
+                )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ParityCard(
+                        title = "Even digits (0,2,4,6,8)",
+                        percentage = evenPct,
+                        sampleSize = currentMarket.sampleSize,
+                        isHot = hotIsEven
+                    )
+                    ParityCard(
+                        title = "Odd digits (1,3,5,7,9)",
+                        percentage = oddPct,
+                        sampleSize = currentMarket.sampleSize,
+                        isHot = !hotIsEven
+                    )
+                }
+            }
+
+            // The 0-9 list, each digit labelled with its parity. Tapping one opens its
+            // all-markets breakdown.
+            item {
+                Text(
+                    text = "Digits — tap one for its all-markets breakdown",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary
+                )
+            }
+
+            item {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    (0..9).forEach { d ->
+                        val isSelected = d == selectedDigit
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSelected) Color(0xFF2C2812) else SurfaceDarkCard)
+                                .clickable { onDigitSelected(d) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                                .testTag("even_odd_digit_${d}"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .background(
+                                        if (isSelected) VividYellow else Color(0xFF232734),
+                                        RoundedCornerShape(6.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "$d",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = if (isSelected) Color(0xFF101216) else VividYellow
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (d % 2 == 0) "Even" else "Odd",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (d % 2 == 0) StatGreen else StatRed
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            val f = currentMarket.digitFrequencies.firstOrNull { it.digit == d }
+                            Text(
+                                text = if (currentMarket.sampleSize >= 10) {
+                                    String.format(Locale.US, "%.1f%% · %d ticks", f?.percentage ?: 0.0, f?.count ?: 0)
+                                } else {
+                                    "no data yet"
+                                },
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+                }
+            }
+
+            // The all-markets breakdown for the tapped digit.
+            selectedDigit?.let { d ->
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("digit_breakdown_${d}")
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                text = "Digit $d (${if (d % 2 == 0) "Even" else "Odd"}) · all markets",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = VividYellow
+                            )
+                            Text(
+                                text = "How often $d ended the last tick of each market, over that " +
+                                    "market's own window.",
+                                fontSize = 10.sp,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SupportedMarkets.ALL.forEach { def ->
+                                val state = marketsState[def.symbol]
+                                val f = state?.digitFrequencies?.firstOrNull { it.digit == d }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = def.displayName,
+                                        fontSize = 11.sp,
+                                        color = TextPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (state != null && state.sampleSize >= 10 && f != null) {
+                                        Text(
+                                            text = String.format(
+                                                Locale.US, "%.1f%% · %d of %d",
+                                                f.percentage, f.count, state.sampleSize
+                                            ),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (f.percentage >= 20.0) StatGreen else TextPrimary
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "no data yet",
+                                            fontSize = 11.sp,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Text(
+                    text = "The Even/Odd strategy trades the side that clears its percentage in " +
+                        "Trade Settings. An \"above\" condition bets the hot side; a \"below\" " +
+                        "condition bets the cold one. Percentages describe the window already " +
+                        "counted, not the next tick.",
+                    fontSize = 10.sp,
+                    color = TextSecondary.copy(alpha = 0.75f)
+                )
+            }
+        }
+
+        // ================= OVER & UNDER ANALYSIS — belongs to the Differs strategy =================
+        if (!isEvenOddStrategy && currentTab == OVER_UNDER_TAB) {
             item {
                 // Filter Switcher: All, Over, Under
                 Row(
@@ -592,6 +811,50 @@ fun AnalysisScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * One side of the parity readout: which class of last digit the market has been producing, over
+ * the window already counted.
+ *
+ * The two cards always sum to 100% — they are the two halves of the same distribution — so the
+ * "hot" side is whichever one is at or above 50%. That is the side an "above" condition would
+ * trade, and the screen says so with the border rather than leaving the user to do the subtraction.
+ */
+@Composable
+private fun ParityCard(
+    title: String,
+    percentage: Double,
+    sampleSize: Int,
+    isHot: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val tint = if (isHot) StatGreen else TextSecondary
+    Card(
+        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (isHot) StatGreen.copy(alpha = 0.5f) else BorderDark
+        ),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(text = title, fontSize = 11.sp, color = TextSecondary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = String.format(Locale.US, "%.1f%%", percentage),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = tint
+            )
+            Text(
+                text = "${if (isHot) "hot side · " else ""}$sampleSize ticks",
+                fontSize = 10.sp,
+                color = TextSecondary
+            )
         }
     }
 }

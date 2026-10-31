@@ -54,4 +54,66 @@ class RandomDigitSelectionTest {
 
         assertEquals("every digit except 7 should be reachable", 9, seen.size)
     }
+
+    /**
+     * A digit on a cool-off must not be re-rolled. Drawing it and filtering afterwards would waste
+     * the draw and leave that market reading as if it had failed the condition, when it had not.
+     */
+    @Test
+    fun `a parked digit is never drawn`() {
+        val parked = setOf(3, 8)
+        repeat(1_000) {
+            assertTrue("drew ${drawRandomDigit(5, parked)}, which is parked", drawRandomDigit(5, parked) !in parked)
+        }
+    }
+
+    @Test
+    fun `when one digit is free it is drawn even though every other is parked`() {
+        // Nine of ten digits parked and the previous draw is a parked one, so the strict pool is
+        // empty. The fallback must return the single legal digit rather than nothing.
+        repeat(200) {
+            assertEquals(
+                "the only digit still tradeable",
+                4,
+                drawRandomDigit(7, (0..9).filter { it != 4 }.toSet())
+            )
+        }
+    }
+
+    /**
+     * The other fallback, and the one that is genuinely a trade-off rather than a convenience: when
+     * the previous draw is itself the only free digit, no-legal-non-repeat exists. Repeating wins,
+     * because a repeat is merely a cosmetic stutter while a parked digit is a refused order. The
+     * sweep's cool-off check is what actually blocks that order.
+     */
+    @Test
+    fun `a repeat beats a parked digit when only the previous digit is free`() {
+        repeat(200) {
+            assertEquals(
+                "the only digit still tradeable, even though it repeats",
+                7,
+                drawRandomDigit(7, (0..9).filter { it != 7 }.toSet())
+            )
+        }
+    }
+
+    /**
+     * Parking every digit is not a state the market can trade in, but it must not crash or silently
+     * drop the market out of the sweep — the draw falls back to the full range and the sweep's
+     * cool-off check is what actually refuses the order.
+     */
+    @Test
+    fun `parking every digit falls back to the full range instead of failing`() {
+        val drawn = drawRandomDigit(null, (0..9).toSet())
+        assertTrue("drew $drawn, outside 0..9", drawn in 0..9)
+    }
+
+    @Test
+    fun `a parked digit never displaces a digit that is merely the previous one`() {
+        // previous == a parked digit is contradictory state; the parked set must still win, since
+        // the trade would be refused either way and a repeated digit is the lesser problem.
+        repeat(200) {
+            assertTrue(drawRandomDigit(3, setOf(3)) !in setOf(3))
+        }
+    }
 }

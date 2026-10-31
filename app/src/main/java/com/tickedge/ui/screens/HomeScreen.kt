@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,11 +36,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.window.Popup
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,7 +55,16 @@ import com.tickedge.data.model.AccountType
 import com.tickedge.data.model.ConnectionStatus
 import com.tickedge.data.model.MarketState
 import com.tickedge.data.model.SupportedMarkets
+import com.tickedge.auth.DerivSlot
+import com.tickedge.domain.StrategyCatalog
+import com.tickedge.domain.StrategyDefinition
+import com.tickedge.domain.StrategyRunState
+import com.tickedge.ui.components.AccountManagerSheet
+import com.tickedge.ui.components.BalanceSyncChip
 import com.tickedge.ui.components.ConnectionBadge
+import com.tickedge.ui.components.ProfileButton
+import com.tickedge.ui.components.StrategyGuideButton
+import com.tickedge.ui.components.StrategyGuideSheet
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.StatGreen
 import com.tickedge.ui.theme.StatRed
@@ -77,13 +92,51 @@ fun HomeScreen(
     onSwitchStatsPeriod: (String) -> Unit,
     onMarketSelected: (String) -> Unit,
     onNavigateToTrade: () -> Unit,
+    /** The running strategy's live figures, so the bar says what it has done so far. */
+    strategyRunState: StrategyRunState? = null,
+    /** The running strategy, used to look up its plain-English guide. */
+    strategy: StrategyDefinition = StrategyCatalog.DEFAULT,
+    /** Opens the strategy list, for switching. */
+    onOpenStrategies: () -> Unit = {},
+    /**
+     * The Deriv accounts this device is signed in to, for the account manager.
+     */
+    derivSlots: List<DerivSlot> = emptyList(),
+    /** The account currently in use. */
+    activeSlotId: String = "",
+    /** Switches to another Deriv account. */
+    onSelectDerivAccount: (String) -> Unit = {},
+    /** Starts a sign-in for another Deriv account. */
+    onAddDerivAccount: () -> Unit = {},
+    /** Signs out of one Deriv account. */
+    onSignOutDerivAccount: (String) -> Unit = {},
+    /**
+     * True when the balance is arriving by push from the selected account's socket.
+     *
+     * Both demo and real hold a socket, so this describes whichever account is on screen. When it is
+     * false the figure is still shown, but only as fresh as the last poll, and the display must not
+     * imply otherwise.
+     */
+    isBalanceLive: Boolean = false,
+    isSyncing: Boolean = false,
+    onSyncBalances: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val displayBalance = activeAccount?.balance ?: 0.0
+    // An account that has not loaded yet is not an account with no money. Rendering it as
+    // "$ 0.00" claims the user is broke when the truth is that the figure is unknown, so the
+    // unloaded state gets its own placeholder.
+    val displayBalance = activeAccount?.balance
 
     val displayPnL = if (statsPeriod == "Today") todayPnL else allTimePnL
 
-    LazyColumn(
+    // The guide sits above everything else, and can be opened straight from the strategy bar.
+    var showGuide by remember { mutableStateOf(false) }
+
+    // The account manager, opened from the profile button in the header.
+    var showAccounts by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF0D0E12))
@@ -140,7 +193,74 @@ fun HomeScreen(
                     }
                 }
 
-                ConnectionBadge(status = overallConnection)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ConnectionBadge(status = overallConnection)
+                    // The account manager. It lives in the header because which Deriv account is
+                    // in use is the first thing that changes everything else — the balances, the
+                    // trades, the history.
+                    ProfileButton(onClick = { showAccounts = true })
+                }
+            }
+        }
+
+        // Which strategy is running, what it has done so far, and the way back to the list.
+        //
+        // The strategy is the thing the app is now doing, so it belongs on the first screen rather
+        // than hidden behind a menu — otherwise the user has no idea which rules are in force.
+        // The status line is the same figures the notification carries, so the two can never
+        // disagree.
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF12141C), RoundedCornerShape(12.dp))
+                    .border(1.dp, BorderDark, RoundedCornerShape(12.dp))
+                    .clickable { onOpenStrategies() }
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .testTag("strategy_bar"),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Running strategy",
+                        fontSize = 10.sp,
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = strategy.name,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = VividYellow
+                    )
+                    if (strategyRunState != null && strategyRunState.trades > 0) {
+                        Text(
+                            text = "${strategyRunState.status.label} · " +
+                                "${strategyRunState.tradesLabel} · ${strategyRunState.pnlLabel}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (strategyRunState.netPnl >= 0) StatGreen else StatRed
+                        )
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // The list label sits on the left; the icon is the one at the edge, on the
+                    // right. An "i" rather than an eye: it says "information about this" without
+                    // promising it changes anything.
+                    Text(
+                        text = "Change",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    StrategyGuideButton(onClick = { showGuide = true })
+                }
             }
         }
 
@@ -227,11 +347,24 @@ fun HomeScreen(
                                 )
                             }
                             Text(
-                                text = String.format(Locale.US, "$ %.2f", displayBalance),
+                                text = displayBalance?.let {
+                                    String.format(Locale.US, "$ %.2f", it)
+                                } ?: "— — —",
                                 fontSize = 32.sp,
                                 fontWeight = FontWeight.Black,
-                                color = VividYellow
+                                color = if (displayBalance == null) TextSecondary else VividYellow
                             )
+                            // Says which state the figure is in and doubles as the sync control.
+                            // Replacing the old static caption: it claimed freshness without being
+                            // able to report a lost socket, and gave the user no way to ask.
+                            if (displayBalance != null) {
+                                BalanceSyncChip(
+                                    isLive = isBalanceLive,
+                                    isSyncing = isSyncing,
+                                    onSync = onSyncBalances,
+                                    modifier = Modifier.padding(top = 6.dp)
+                                )
+                            }
                         }
 
                         // Syncing status badge
@@ -393,6 +526,66 @@ fun HomeScreen(
                     fontWeight = FontWeight.Bold
                 )
             }
+        }
+    }
+    }
+
+    // The guide, opened from the strategy bar's eye icon. It overlays the screen rather than
+    // replacing it, so closing it puts the user exactly where they were.
+    if (showGuide) {
+        // Same rule as the account manager: the panel floats, and anything outside it closes it.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable { showGuide = false }
+        )
+        Popup(alignment = Alignment.TopEnd) {
+            StrategyGuideSheet(
+                strategy = strategy,
+                onClose = { showGuide = false },
+                modifier = Modifier
+                    .padding(horizontal = 12.dp, vertical = 64.dp)
+                    .widthIn(max = 360.dp)
+            )
+        }
+    }
+
+    // The account manager, opened from the profile button in the header.
+    //
+    // It floats next to the button that opened it — a bottom sheet read as a modal that covered
+    // the screen, and with nothing dimming it, tapping anywhere else (another button, the guide)
+    // did not close it. Two things fix both complaints:
+    //  - a full-screen transparent backdrop, so ANY tap outside — another button, the strategy
+    //    bar, whatever — closes it, which is the behaviour every floating panel has;
+    //  - a `Popup` aligned TopEnd, so it appears right below the profile icon.
+    if (showAccounts) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable { showAccounts = false }
+                .testTag("account_manager_backdrop")
+        )
+        Popup(alignment = Alignment.TopEnd) {
+            AccountManagerSheet(
+                slots = derivSlots,
+                activeSlotId = activeSlotId,
+                onSelect = { slotId ->
+                    showAccounts = false
+                    onSelectDerivAccount(slotId)
+                },
+                onAddAccount = {
+                    showAccounts = false
+                    onAddDerivAccount()
+                },
+                onSignOut = { slotId ->
+                    showAccounts = false
+                    onSignOutDerivAccount(slotId)
+                },
+                onClose = { showAccounts = false },
+                modifier = Modifier
+                    .padding(horizontal = 12.dp, vertical = 64.dp)
+                    .widthIn(max = 340.dp)
+            )
         }
     }
 }

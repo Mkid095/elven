@@ -87,9 +87,35 @@ class DerivOAuthRedirectActivity : Activity() {
         val client = DerivOAuthClient.share(applicationContext, scope)
         scope.launch {
             // Failure is already reflected in authState; either way return to MainActivity.
-            withContext(NonCancellable) { client.handleCallback(data) }
+            val outcome = withContext(NonCancellable) { client.handleCallbackDetailed(data) }
+            if (outcome == DerivOAuthClient.CallbackOutcome.SCOPE_REJECTED) {
+                // Deriv refused the scopes the app asked for — usually `openid`, which the
+                // dashboard has to allow before Deriv will issue an ID token.
+                //
+                // The app asks for less and tries again rather than leaving the user unable to
+                // sign in at all. The reduced request still signs them in; it just means no
+                // cross-device sync until the Deriv app registration allows `openid`.
+                retryWithReducedScope(client)
+                return@launch
+            }
             finishAndGoToMain()
         }
+    }
+
+    /**
+     * Re-opens Deriv's authorization page with the reduced scope set.
+     *
+     * The activity finishes itself so the browser comes to the front; when Deriv redirects back,
+     * a fresh instance of this activity handles the callback.
+     */
+    private fun retryWithReducedScope(client: DerivOAuthClient) {
+        val slotId = client.pendingSlotId()
+        if (slotId == null) {
+            finishAndGoToMain()
+            return
+        }
+        client.startLogin(this, slotId)
+        finish()
     }
 
     private fun finishAndGoToMain() {

@@ -57,9 +57,13 @@ class DigitAnalysisEngineDiffersTest {
 
     @Test
     fun `a digit that never appears is a fully differing contract`() {
-        val freqs = frequencies(10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4, 10.4)
+        // `frequencies` takes one percentage per digit IN ORDER, so digit 0 is the FIRST argument.
+        // Nine digits share the total evenly and digit 0 gets zero, which makes differs 100.
+        // Percentages are raw here — the helper does not renormalise, so they sum to exactly 100.
+        val freqs = frequencies(0.0, 100.0 / 9, 100.0 / 9, 100.0 / 9, 100.0 / 9,
+            100.0 / 9, 100.0 / 9, 100.0 / 9, 100.0 / 9, 100.0 / 9)
 
-        assertEquals(90.0, DigitAnalysisEngine.differsPercentFor(freqs, 0), 0.001)
+        assertEquals(100.0, DigitAnalysisEngine.differsPercentFor(freqs, 0), 0.001)
     }
 
     @Test

@@ -36,13 +36,16 @@ import com.tickedge.ui.theme.VividYellow
 import java.util.Locale
 
 /**
- * Ordinary level of Differs % on live Deriv synthetic ticks.
+ * Ordinary level of a digit percentage on live Deriv synthetic ticks.
  *
  * Ten last digits on a roughly uniform stream give P(last digit != d) ~90%. A threshold at or below
  * that describes the market's normal behaviour rather than selecting a moment, which is what the
  * warning below is for.
  */
 private const val DIFFERS_BASELINE = 90.0
+
+/** Ordinary level of an Even/Odd percentage: five even + five odd last digits, ~50% each. */
+const val PARITY_BASELINE = 50.0
 
 /**
  * The two analysis controls: how many ticks are analysed, and the above/below entry condition.
@@ -67,15 +70,24 @@ fun AnalysisConditionFields(
     minWindow: Int,
     maxWindow: Int,
     minSampleSize: Int,
+    /**
+     * The ordinary level of the metric the threshold is compared against.
+     *
+     * The Differs card passes [DIFFERS_BASELINE] (~90); a parity card passes [PARITY_BASELINE]
+     * (~50). Without this the "fires constantly" warning would judge a parity threshold on the
+     * Differs baseline and tell a 60% threshold it is ordinary when, for Even/Odd, it is a
+     * genuinely selective one.
+     */
+    baseline: Double = DIFFERS_BASELINE,
     modifier: Modifier = Modifier
 ) {
     // A condition at or below the baseline is satisfied by ordinary market behaviour, so it
     // qualifies on nearly every tick rather than selecting anything.
     val firesConstantly = when (operator) {
-        ComparisonOperator.GREATER_THAN -> thresholdPercent <= DIFFERS_BASELINE
-        ComparisonOperator.GREATER_OR_EQUAL -> thresholdPercent < DIFFERS_BASELINE
-        ComparisonOperator.LESS_THAN -> thresholdPercent >= DIFFERS_BASELINE
-        ComparisonOperator.LESS_OR_EQUAL -> thresholdPercent > DIFFERS_BASELINE
+        ComparisonOperator.GREATER_THAN -> thresholdPercent <= baseline
+        ComparisonOperator.GREATER_OR_EQUAL -> thresholdPercent < baseline
+        ComparisonOperator.LESS_THAN -> thresholdPercent >= baseline
+        ComparisonOperator.LESS_OR_EQUAL -> thresholdPercent > baseline
     }
 
     val windowTooSmall = (windowText.toIntOrNull() ?: minWindow) < minSampleSize
@@ -89,14 +101,15 @@ fun AnalysisConditionFields(
             // Digits only, capped at 4 chars: 1000 is the retained-history ceiling, so anything
             // longer is not a value the pipeline could honour.
             onValueChange = { input -> onWindowTextChange(input.filter { it.isDigit() }.take(4)) },
-            label = { Text("Ticks to Analyze") },
+            label = { Text("How many recent ticks to count") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             trailingIcon = {
                 Text(text = "ticks", color = TextSecondary, modifier = Modifier.padding(end = 12.dp))
             },
             supportingText = {
                 Text(
-                    text = "Sample window used by both Differs and Over/Under analysis ($minWindow–$maxWindow).",
+                    text = "The bot counts how often each digit appears in the last N ticks of " +
+                        "every market you watch. 100 is a good start.",
                     fontSize = 11.sp,
                     color = TextSecondary
                 )
@@ -119,10 +132,9 @@ fun AnalysisConditionFields(
         if (windowTooSmall) {
             WarningCard(
                 testTag = "window_too_small_warning",
-                title = "This window is too small to ever trigger an entry",
-                body = "An entry needs at least $minSampleSize valid ticks before the threshold is " +
-                    "evaluated at all. At ${windowText.ifBlank { "0" }} ticks the bot will analyse but " +
-                    "never trade.",
+                title = "Not enough ticks yet — no trade will be placed",
+                body = "The bot needs at least $minSampleSize ticks before it can judge a market. " +
+                    "With ${windowText.ifBlank { "0" }} it will watch, but it will not trade.",
                 tint = VividYellow,
                 background = Color(0xFF241A10),
                 borderColor = Color(0xFF6B4A2F)
@@ -130,7 +142,7 @@ fun AnalysisConditionFields(
         }
 
         Text(
-            text = "Enter when Differs % is:",
+            text = "Buy when the number is:",
             fontSize = 13.sp,
             color = TextSecondary,
             fontWeight = FontWeight.SemiBold
@@ -176,7 +188,7 @@ fun AnalysisConditionFields(
                     }
                 onThresholdTextChange(cleaned.take(6))
             },
-            label = { Text("Threshold Percentage") },
+            label = { Text("Buy-signal percentage") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             trailingIcon = {
                 Text(
@@ -209,16 +221,16 @@ fun AnalysisConditionFields(
                 } else {
                     "This threshold is rare — the bot may never trade"
                 },
-                body = "Differs % normally sits near " +
-                    "${String.format(Locale.US, "%.0f", DIFFERS_BASELINE)}% on live ticks. " +
+                body = "The percentage this condition tests normally sits near " +
+                    "${String.format(Locale.US, "%.0f", baseline)}% on live ticks. " +
                     (if (operator == ComparisonOperator.GREATER_THAN ||
                         operator == ComparisonOperator.GREATER_OR_EQUAL
                     ) {
                         "A threshold at or below that is ordinary market behaviour, not a filter, " +
                             "so the bot would enter continuously."
                     } else {
-                        "Entering only below this figure needs the target digit to be running well " +
-                            "above its usual share — and a contract that rarely wins."
+                        "Entering only below this figure needs the measured percentage to run " +
+                            "well above its usual share — and a contract that rarely wins."
                     }),
                 tint = Color(0xFFF0879A),
                 background = Color(0xFF241016),

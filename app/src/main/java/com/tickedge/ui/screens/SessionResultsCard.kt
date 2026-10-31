@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import com.tickedge.data.local.LastTradeRow
 import com.tickedge.data.local.SessionSummary
 import com.tickedge.data.local.SimulationSessionEntity
+import com.tickedge.ui.components.AccountRibbon
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.StatGreen
 import com.tickedge.ui.theme.StatRed
@@ -48,16 +49,42 @@ import java.util.Locale
  *
  * Shows: last confirmed trade, total realised P&L, completed trade count, session start and
  * status, and the account and strategy the session ran on.
+ *
+ * @param previousSession the most recent finished session with results. Pressing Start opens a new
+ *   session that has, by definition, no trades yet — so every figure on this card fell to $0.00 the
+ *   instant the user started the next run, which reads as the history having been wiped even though
+ *   it is all still in the database. When the live session has nothing settled, the last finished
+ *   session is shown instead, clearly labelled, until the new one produces its first result.
  */
 @Composable
 fun SessionResultsCard(
     session: SimulationSessionEntity?,
     summary: SessionSummary?,
     lastTrade: LastTradeRow?,
+    previousSession: SimulationSessionEntity? = null,
     modifier: Modifier = Modifier
 ) {
     val startedFormat = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.US) }
     val tradeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.US) }
+
+    val liveTrades = summary?.completedTrades ?: 0
+    // A session with nothing settled has no results to report. If a finished session does, that is
+    // the more useful thing to show, as long as it says so. Resolved to a nullable rather than a
+    // boolean so every read below goes through `?.` — the pair can never disagree about whether
+    // there is a previous session to read from.
+    val liveHasResults = liveTrades > 0 || lastTrade != null
+    val shownPrevious = previousSession?.takeIf { !liveHasResults && it.totalTrades > 0 }
+    val shown = shownPrevious ?: session
+
+    // Figures come from SQL over the trades while a session is running, and from the row's own
+    // stored totals once it is closed — the same numbers `closeSession` wrote from that SQL.
+    val realized = shownPrevious?.netProfit ?: (summary?.totalRealizedPnl ?: 0.0)
+    val wins = shownPrevious?.winCount ?: (summary?.winCount ?: 0)
+    val losses = shownPrevious?.lossCount ?: (summary?.lossCount ?: 0)
+    val completed = shownPrevious?.totalTrades ?: liveTrades
+    val grossProfit = shownPrevious?.grossProfit ?: (summary?.grossProfit ?: 0.0)
+    val grossLoss = shownPrevious?.grossLoss ?: (summary?.grossLoss ?: 0.0)
+    val staked = shownPrevious?.totalStaked ?: (summary?.totalStaked ?: 0.0)
 
     Card(
         colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
@@ -66,6 +93,24 @@ fun SessionResultsCard(
         modifier = modifier.fillMaxWidth().testTag("session_results_card")
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            if (shownPrevious != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF2C2812), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("session_showing_previous")
+                ) {
+                    Text(
+                        text = "Showing your last finished session (#${shownPrevious.id}). " +
+                            "Session #${session?.id ?: "—"} is running and has no settled trades yet.",
+                        fontSize = 11.sp,
+                        color = VividYellow
+                    )
+                }
+                Spacer8()
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -73,14 +118,25 @@ fun SessionResultsCard(
             ) {
                 Column {
                     Text(
-                        text = if (session != null) "Session #${session.id}" else "No session yet",
+                        text = if (shown != null) "Session #${shown.id}" else "No session yet",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
                     )
                     Text(
-                        text = if (session != null) {
-                            "Started ${startedFormat.format(Date(session.startedAt))}"
+                        text = if (shown != null) {
+                            // Both ends, because a session that silently never closes reads as one
+                            // long run. Before the engine reported its own exits, a run stopped by its
+                            // stop loss left no `endedAt` at all and the next Start inherited the
+                            // session, so the two runs shared one timestamp pair.
+                            buildString {
+                                append("Started ")
+                                append(startedFormat.format(Date(shown.startedAt)))
+                                shown.endedAt?.let {
+                                    append(" · Ended ")
+                                    append(startedFormat.format(Date(it)))
+                                }
+                            }
                         } else {
                             "Press Start Automated Trading to open one."
                         },
@@ -88,27 +144,29 @@ fun SessionResultsCard(
                         color = TextSecondary
                     )
                 }
-                SessionStatusPill(session?.status)
+                SessionStatusPill(shown?.status)
             }
 
-            if (session != null) {
+            if (shown != null) {
                 Spacer8()
+                // The account type is stated before the totals, not implied by them. This card sits
+                // at the very top of the History page and carries the headline P&L, so it is the
+                // most screenshot-worthy thing on the screen.
+                AccountRibbon(
+                    isReal = shown.isReal,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MetaChip(
                         label = "Account",
-                        value = session.accountId.ifBlank { "unknown" },
-                        emphasis = session.isReal
+                        value = shown.accountId.ifBlank { "unknown" },
+                        emphasis = shown.isReal
                     )
-                    MetaChip(label = "Strategy", value = session.strategy, emphasis = false)
+                    MetaChip(label = "Strategy", value = shown.strategy, emphasis = false)
                 }
             }
 
             Spacer8()
-
-            val realized = summary?.totalRealizedPnl ?: 0.0
-            val wins = summary?.winCount ?: 0
-            val losses = summary?.lossCount ?: 0
-            val completed = summary?.completedTrades ?: 0
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -148,9 +206,29 @@ fun SessionResultsCard(
                 )
                 Text(text = "·", fontSize = 12.sp, color = TextSecondary)
                 Text(
-                    text = "Staked ${String.format(Locale.US, "%.2f", summary?.totalStaked ?: 0.0)}",
+                    text = "Staked ${String.format(Locale.US, "%.2f", staked)}",
                     fontSize = 12.sp,
                     color = TextSecondary
+                )
+            }
+
+            // Gross profit and gross loss shown apart, because the net alone hides the shape of a
+            // run: +$2.00 net from five $5 wins and two $11.50 losses is a very different session
+            // from +$2.00 net off two small wins, and only the split tells you which one happened.
+            Spacer8()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Profit ${String.format(Locale.US, "%.2f", grossProfit)}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = StatGreen
+                )
+                Text(text = "·", fontSize = 12.sp, color = TextSecondary)
+                Text(
+                    text = "Loss ${String.format(Locale.US, "%.2f", grossLoss)}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = StatRed
                 )
             }
 
@@ -164,7 +242,13 @@ fun SessionResultsCard(
                     .padding(12.dp)
                     .testTag("session_last_trade")
             ) {
-                if (lastTrade == null) {
+                if (shownPrevious != null) {
+                    Text(
+                        text = "Last trade of session #${shownPrevious.id} is in the Trades tab.",
+                        fontSize = 12.sp,
+                        color = TextSecondary
+                    )
+                } else if (lastTrade == null) {
                     Text(
                         text = "No confirmed trade yet in this session.",
                         fontSize = 12.sp,

@@ -161,7 +161,7 @@ class InstantDbClient(
     suspend fun upsertUserSettings(
         userId: String,
         fields: Map<String, Any?>,
-        entityId: String = UUID.randomUUID().toString()
+        entityId: String
     ): Result<TxnResult> {
         val steps = mutableListOf(
             step(OP_MERGE, entityId, FidscriptAttrs.USER_SETTINGS_USERID, userId)
@@ -175,6 +175,76 @@ class InstantDbClient(
             steps += step(OP_MERGE, entityId, attrId, value)
         }
         steps += step(OP_MERGE, entityId, FidscriptAttrs.USER_SETTINGS_ID, entityId)
+        return transact(steps)
+    }
+
+    /**
+ * Create or update one row of `trade_history`.
+ *
+ * `userId` is written first in the same transaction, for the same reason as in
+ * [upsertUserSettings]: a write that omits it fails the row permission check and the trade is
+ * silently lost.
+ */
+    suspend fun upsertTrade(
+        entityId: String,
+        fields: Map<String, Any?>
+    ): Result<TxnResult> {
+        // Checked before building, because a caller that maps a name this class does not know
+        // would otherwise get a transaction containing only the id triple — a row that exists but
+        // holds none of the trade, which reads back as an empty trade rather than as an error.
+        val resolved = fields.entries.mapNotNull { (name, value) ->
+            if (value == null) return@mapNotNull null
+            val attrId = tradeHistoryAttr(name)
+                ?: return Result.failure(
+                    IllegalArgumentException("Unknown trade_history attribute: $name")
+                )
+            attrId to value
+        }
+        if (resolved.isEmpty()) {
+            return Result.failure(IllegalArgumentException("trade_history write had no fields"))
+        }
+
+        // userId first, for the same reason as upsertUserSettings: the row's permission check
+        // depends on it, so a write that reaches the server without it is rejected outright.
+        val steps = mutableListOf<JSONArray>()
+        resolved.firstOrNull { it.first == FidscriptAttrs.TRADE_HISTORY_USERID }
+            ?.let { steps += step(OP_MERGE, entityId, it.first, it.second) }
+        resolved.filter { it.first != FidscriptAttrs.TRADE_HISTORY_USERID }
+            .forEach { (attrId, value) -> steps += step(OP_MERGE, entityId, attrId, value) }
+        steps += step(OP_MERGE, entityId, FidscriptAttrs.TRADE_HISTORY_ID, entityId)
+        return transact(steps)
+    }
+
+    /**
+     * Create or update the account record for a TickEdge person.
+     *
+     * Written at sign-up (first magic-code sign-in): the name the person gave is what identifies
+     * them on the platform, and it belongs in the cloud so the next device can say who it is
+     * without the person re-typing it.
+     */
+    suspend fun upsertTickedgeUser(
+        fidUserId: String,
+        entityId: String,
+        fields: Map<String, Any?>
+    ): Result<TxnResult> {
+        val steps = mutableListOf(
+            step(OP_MERGE, entityId, FidscriptAttrs.TICKEDGE_USERS_USERID, fidUserId),
+            step(OP_MERGE, entityId, FidscriptAttrs.TICKEDGE_USERS_ID, entityId)
+        )
+        fields.forEach { (name, value) ->
+            if (value == null) return@forEach
+            val attrId = when (name) {
+                "firstName" -> FidscriptAttrs.TICKEDGE_USERS_FIRSTNAME
+                "lastName" -> FidscriptAttrs.TICKEDGE_USERS_LASTNAME
+                "username" -> FidscriptAttrs.TICKEDGE_USERS_USERNAME
+                "email" -> FidscriptAttrs.TICKEDGE_USERS_EMAIL
+                "createdAt" -> FidscriptAttrs.TICKEDGE_USERS_CREATEDAT
+                else -> return Result.failure(
+                    IllegalArgumentException("Unknown tickedge_users attribute: $name")
+                )
+            }
+            steps += step(OP_MERGE, entityId, attrId, value)
+        }
         return transact(steps)
     }
 
@@ -208,11 +278,28 @@ class InstantDbClient(
         "activeAccount" -> FidscriptAttrs.USER_SETTINGS_ACTIVEACCOUNTKIND
         "accountId" -> FidscriptAttrs.USER_SETTINGS_ACCOUNTID
         "updatedAt" -> FidscriptAttrs.USER_SETTINGS_UPDATEDAT
+        // Added with the cross-device sync work: without these the values the Trade Settings
+        // screen edits had nowhere to land, so a perfectly good push still dropped them.
+        "thresholdPercent" -> FidscriptAttrs.USER_SETTINGS_THRESHOLDPERCENT
+        "comparisonOperator" -> FidscriptAttrs.USER_SETTINGS_COMPARISONOPERATOR
+        "analysisMetric" -> FidscriptAttrs.USER_SETTINGS_ANALYSISMETRIC
+        "digitSelectionMode" -> FidscriptAttrs.USER_SETTINGS_DIGITSELECTIONMODE
+        "windowSize" -> FidscriptAttrs.USER_SETTINGS_WINDOWSIZE
+        "durationUnit" -> FidscriptAttrs.USER_SETTINGS_DURATIONUNIT
+        "durationValue" -> FidscriptAttrs.USER_SETTINGS_DURATIONVALUE
+        "martingaleEnabled" -> FidscriptAttrs.USER_SETTINGS_MARTINGALEENABLED
+        "randomMarkets" -> FidscriptAttrs.USER_SETTINGS_RANDOMMARKETS
+        "maxTradesPerMarket" -> FidscriptAttrs.USER_SETTINGS_MAXTRADESPERMARKET
+        "stopTradingOnLimit" -> FidscriptAttrs.USER_SETTINGS_STOPTRADINGONLIMIT
+        "minSampleSize" -> FidscriptAttrs.USER_SETTINGS_MINSAMPLESIZE
+        "recoveryComparisonOperator" -> FidscriptAttrs.USER_SETTINGS_RECOVERYCOMPARISONOPERATOR
+        "recoveryThresholdPercent" -> FidscriptAttrs.USER_SETTINGS_RECOVERYTHRESHOLD
         else -> null
     }
 
     /** Map a `trade_history` field name to its validated attribute id. */
     fun tradeHistoryAttr(name: String): String? = when (name) {
+        "userId" -> FidscriptAttrs.TRADE_HISTORY_USERID
         "market" -> FidscriptAttrs.TRADE_HISTORY_MARKET
         "digit" -> FidscriptAttrs.TRADE_HISTORY_DIGIT
         "stake" -> FidscriptAttrs.TRADE_HISTORY_STAKE
@@ -224,6 +311,15 @@ class InstantDbClient(
         "accountId" -> FidscriptAttrs.TRADE_HISTORY_ACCOUNTID
         "note" -> FidscriptAttrs.TRADE_HISTORY_NOTE
         "createdAt" -> FidscriptAttrs.TRADE_HISTORY_CREATEDAT
+        "openedAt" -> FidscriptAttrs.TRADE_HISTORY_OPENEDAT
+        "askPrice" -> FidscriptAttrs.TRADE_HISTORY_ASKPRICE
+        "payout" -> FidscriptAttrs.TRADE_HISTORY_PAYOUT
+        // Null is meaningful here and is dropped rather than written as 0: a trade with no recorded
+        // ratio has to stay distinguishable from one that genuinely paid 0%.
+        "payoutRatio" -> FidscriptAttrs.TRADE_HISTORY_PAYOUTRATIO
+        "contractType" -> FidscriptAttrs.TRADE_HISTORY_CONTRACTTYPE
+        "recoveryStep" -> FidscriptAttrs.TRADE_HISTORY_RECOVERYSTEP
+        "outstandingBefore" -> FidscriptAttrs.TRADE_HISTORY_OUTSTANDINGBEFORE
         else -> null
     }
 
@@ -260,11 +356,34 @@ class InstantDbClient(
         message.ifBlank { body.take(180) }
     }.getOrDefault(body.take(180))
 
-    private companion object {
+    companion object {
         const val OP_MERGE = "deep-merge-triple"
         const val OP_RETRACT = "retract-triple"
         const val OP_DELETE = "delete-entity"
         val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /**
+         * Stable FIDScript entity id for this user's settings row.
+         *
+         * Derived from the user id rather than stored locally, because the whole point of the
+         * cloud copy is surviving a reinstall: after the app is wiped there is nothing left to read
+         * a locally stored id from. Both sides compute the same value independently, so a push and a
+         * pull always address the same row without a lookup. In the companion because it needs no
+         * client, no session and no network — it is arithmetic over a string, and that is what
+         * makes it testable without a device.
+         */
+        fun settingsEntityId(fidUserId: String): String =
+            UUID.nameUUIDFromBytes("tickedge:settings:$fidUserId".toByteArray()).toString()
+
+        /**
+         * Stable entity id for one trade.
+         *
+         * Keyed on `contractId`, which Deriv guarantees unique per contract. Re-uploading therefore
+         * overwrites the same row instead of duplicating the trade, which is what makes the upload
+         * safe to retry after a failed or unknown-outcome transaction.
+         */
+        fun tradeEntityId(contractId: String): String =
+            UUID.nameUUIDFromBytes("tickedge:trade:$contractId".toByteArray()).toString()
     }
 }
 

@@ -13,9 +13,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         UserSettingsEntity::class,
         AnalysisEventEntity::class,
         SimulationSessionEntity::class,
-        SimulationPositionEntity::class
+        SimulationPositionEntity::class,
+        StrategySettingsEntity::class
     ],
-    version = 8,
+    version = 16,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -23,6 +24,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun userSettingsDao(): UserSettingsDao
     abstract fun analysisEventDao(): AnalysisEventDao
     abstract fun simulationDao(): SimulationDao
+    abstract fun strategySettingsDao(): StrategySettingsDao
 
     companion object {
         @Volatile
@@ -35,7 +37,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "tickedge_database"
                 )
-                    .addMigrations(MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7, MIGRATION_7_TO_8)
+                    .addMigrations(*ALL_MIGRATIONS.toTypedArray())
                     .build()
                 INSTANCE = instance
                 instance
@@ -324,5 +326,277 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_simulation_positions_userId_sessionId` ON `simulation_positions` (`userId`, `sessionId`)")
             }
         }
+
+        /**
+         * v8 -> v9: track which trades have been uploaded to FIDScript.
+         *
+         * Additive, so ALTER TABLE ADD COLUMN — recreating the table for an added column drops
+         * foreign keys and no-ops the index (see MIGRATION_5_TO_6's note for how that shipped as a
+         * launch crash).
+         *
+         * Defaulting to 0 marks every existing trade as un-uploaded, which is deliberate and not a
+         * convenience: those rows predate the cloud history entirely, so the first sync has to send
+         * them rather than assume they are there.
+         */
+        private val MIGRATION_8_TO_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `syncedToCloud` INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * v9 -> v10: give the Over/Under recovery its own entry condition.
+         *
+         * Additive, so ALTER TABLE ADD COLUMN throughout (see MIGRATION_5_TO_6's note for how
+         * recreating the table for added columns shipped as a launch crash).
+         *
+         * The defaults are the ones in [UserSettingsEntity], and they are what the app would have
+         * used anyway: existing rows never had a recovery condition of their own, they were being
+         * evaluated against the Differs one, which for any usable Differs threshold (>90%) is a
+         * comparison no ~50%-scale recovery reading can satisfy. So the seeded default is what the
+         * user would get by configuring it themselves, not an invention.
+         */
+        private val MIGRATION_9_TO_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `recoveryComparisonOperator` TEXT NOT NULL DEFAULT '>'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `recoveryThresholdPercent` REAL NOT NULL DEFAULT 55.0"
+                )
+            }
+        }
+
+        /**
+         * v10 → v11: the trade-detail snapshot columns.
+         *
+         * `ALTER TABLE ADD COLUMN`, not a recreate. Recreating `simulation_positions` would drop
+         * its foreign keys to `profiles` and collide with the existing index names — the same trap
+         * the earlier additive migrations avoided.
+         *
+         * Defaults matter here. `payoutRatio` is nullable and the others default to 0/0.0, so every
+         * trade already in the database stays readable and reads as "not recorded" rather than as
+         * a return rate of zero, which would render as a 0% return and look like a real figure.
+         */
+        private val MIGRATION_10_TO_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `askPrice` REAL NOT NULL DEFAULT 0.0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `payoutRatio` REAL"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `recoveryStep` INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `outstandingBefore` REAL NOT NULL DEFAULT 0.0"
+                )
+            }
+        }
+
+        /**
+         * v11 → v12: per-session realised results.
+         *
+         * Additive, for the same reason as every migration before it. Sessions closed before this
+         * keep 0.0 across the new columns, which reads as "no recorded result" rather than as a
+         * break-even run — the distinction matters, because a run that genuinely netted nothing and
+         * a run whose result was never captured are not the same fact.
+         */
+        private val MIGRATION_11_TO_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `netProfit` REAL NOT NULL DEFAULT 0.0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `grossProfit` REAL NOT NULL DEFAULT 0.0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `grossLoss` REAL NOT NULL DEFAULT 0.0"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `totalStaked` REAL NOT NULL DEFAULT 0.0"
+                )
+            }
+        }
+
+        /**
+         * v12 → v13: the strategy the user last ran.
+         *
+         * Additive, like every migration before it. The default is the strategy that has always
+         * been the app's only one, so an existing user opens on the behaviour they are used to
+         * rather than on an empty screen.
+         */
+        private val MIGRATION_12_TO_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `selectedStrategyId` TEXT NOT NULL DEFAULT 'differs_with_recovery'"
+                )
+            }
+        }
+
+        /**
+         * Version 14: persist the live-risk acknowledgement.
+         *
+         * It lived in memory only, so a fresh process armed live silently — `setRealArmed(true)`
+         * saw `liveRiskAcknowledged` false, showed the dialog, and the next restart showed it
+         * again, while a restart *while* on live re-armed it with no question at all. The
+         * acknowledgement is the point, so it must survive with the settings.
+         */
+        private val MIGRATION_13_TO_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `liveRiskAcknowledged` INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * Version 15: persist the Even/Odd strategy's entry settings.
+         *
+         * The three columns steer the parity entry: which class to trade (auto / even / odd),
+         * whether the threshold is an above- or a below-test, and the threshold itself. The
+         * defaults are what [TradeSettings] ships with, so an existing user who has never
+         * touched the Even/Odd card gets a working Auto + above-55% strategy out of the box.
+         *
+         * Additive, like every migration before it — never a table recreate, which would drop
+         * the foreign keys and the index names the earlier migrations built.
+         */
+        private val MIGRATION_14_TO_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `evenOddMode` TEXT NOT NULL DEFAULT 'auto'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `evenOddOperator` TEXT NOT NULL DEFAULT '>'"
+                )
+                db.execSQL(
+                    "ALTER TABLE `user_settings` ADD COLUMN `evenOddThreshold` REAL NOT NULL DEFAULT 55.0"
+                )
+            }
+        }
+
+        /**
+         * Version 16: split the shared settings row into one complete blob per strategy, and stamp
+         * every trade and session with the strategy that produced it.
+         *
+         * The Differs and Even/Odd strategies previously lived in one [UserSettingsEntity] row, so
+         * each strategy's knobs (stake, TP/SL, entry thresholds) were one shared set. This creates
+         * `strategy_settings` — one row per (userId, strategyId) — and seeds each strategy's row
+         * from the legacy values: an upgrade carries the user's configured numbers into *both*
+         * strategies' blobs, which is the intended "split the shared settings" outcome.
+         *
+         * The `EXISTS (…profiles…)` guard on the seed is load-bearing, not defensive: the
+         * production `user_settings` table has no foreign key to `profiles` (the v5 recreate
+         * omitted it — see [MIGRATION_5_TO_6]), so a settings row can exist for a user whose
+         * profile row does not. `strategy_settings` *does* carry the FK, and copying such a row
+         * would abort the whole migration mid-upgrade.
+         *
+         * `strategyId` on positions and sessions backfills from `scenarioType` / the `strategy`
+         * name: the only scenario that belongs to the Even/Odd strategy is "Even / Odd"
+         * ([com.tickedge.data.model.TradeType.EVEN_ODD].displayName) — Differs entries and their
+         * Over/Under recovery rungs both belong to the Differs strategy.
+         */
+        private val MIGRATION_15_TO_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `strategy_settings` (
+                        `userId` TEXT NOT NULL,
+                        `strategyId` TEXT NOT NULL,
+                        `differsDigit` INTEGER NOT NULL DEFAULT 2,
+                        `differsDigitMode` TEXT NOT NULL DEFAULT 'random',
+                        `differsOperator` TEXT NOT NULL DEFAULT '<',
+                        `differsThreshold` REAL NOT NULL DEFAULT 85.0,
+                        `recoveryDirection` TEXT NOT NULL DEFAULT 'OVER',
+                        `recoveryDigit` INTEGER NOT NULL DEFAULT 2,
+                        `recoveryOperator` TEXT NOT NULL DEFAULT '>',
+                        `recoveryThreshold` REAL NOT NULL DEFAULT 80.0,
+                        `evenOddMode` TEXT NOT NULL DEFAULT 'auto',
+                        `evenOddOperator` TEXT NOT NULL DEFAULT '>',
+                        `evenOddThreshold` REAL NOT NULL DEFAULT 55.0,
+                        `stakeAmount` REAL NOT NULL DEFAULT 0.35,
+                        `takeProfit` REAL NOT NULL DEFAULT 10.0,
+                        `stopLoss` REAL NOT NULL DEFAULT 10.0,
+                        `durationUnit` TEXT NOT NULL DEFAULT 'Ticks',
+                        `durationValue` INTEGER NOT NULL DEFAULT 1,
+                        `martingaleEnabled` INTEGER NOT NULL DEFAULT 1,
+                        `analysisWindow` INTEGER NOT NULL DEFAULT 100,
+                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (`userId`, `strategyId`),
+                        FOREIGN KEY (`userId`) REFERENCES `profiles`(`id`) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_strategy_settings_userId` ON `strategy_settings` (`userId`)"
+                )
+
+                fun seedLegacyRows(strategyId: String) {
+                    db.execSQL(
+                        """
+                        INSERT OR IGNORE INTO `strategy_settings`
+                            (`userId`, `strategyId`, `differsDigit`, `differsDigitMode`, `differsOperator`,
+                             `differsThreshold`, `recoveryDirection`, `recoveryDigit`, `recoveryOperator`,
+                             `recoveryThreshold`, `evenOddMode`, `evenOddOperator`, `evenOddThreshold`,
+                             `stakeAmount`, `takeProfit`, `stopLoss`, `durationUnit`, `durationValue`,
+                             `martingaleEnabled`, `analysisWindow`, `updatedAt`)
+                        SELECT `userId`, '$strategyId', `selectedDigit`, `digitSelectionMode`,
+                               `comparisonOperator`, `thresholdPercent`, `recoveryDirection`,
+                               `recoveryDigit`, `recoveryComparisonOperator`, `recoveryThresholdPercent`,
+                               `evenOddMode`, `evenOddOperator`, `evenOddThreshold`,
+                               `stakeAmount`, `takeProfit`, `stopLoss`, `durationUnit`, `durationValue`,
+                               `martingaleEnabled`, `windowSize`, `updatedAt`
+                        FROM `user_settings`
+                        WHERE EXISTS (SELECT 1 FROM `profiles` p WHERE p.`id` = `user_settings`.`userId`)
+                        """.trimIndent()
+                    )
+                }
+                seedLegacyRows("differs_with_recovery")
+                seedLegacyRows("even_odd")
+
+                db.execSQL(
+                    "ALTER TABLE `simulation_positions` ADD COLUMN `strategyId` TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "UPDATE `simulation_positions` SET `strategyId` = 'even_odd' " +
+                        "WHERE `strategyId` = '' AND `scenarioType` LIKE '%Even%'"
+                )
+                db.execSQL(
+                    "UPDATE `simulation_positions` SET `strategyId` = 'differs_with_recovery' " +
+                        "WHERE `strategyId` = ''"
+                )
+                db.execSQL(
+                    "ALTER TABLE `simulation_sessions` ADD COLUMN `strategyId` TEXT NOT NULL DEFAULT ''"
+                )
+                db.execSQL(
+                    "UPDATE `simulation_sessions` SET `strategyId` = 'even_odd' " +
+                        "WHERE `strategyId` = '' AND (`strategy` = 'Even / Odd' OR `strategy` LIKE '%Even%')"
+                )
+                db.execSQL(
+                    "UPDATE `simulation_sessions` SET `strategyId` = 'differs_with_recovery' " +
+                        "WHERE `strategyId` = ''"
+                )
+            }
+        }
+
+        /**
+         * Every migration, in order.
+         *
+         * Exposed so the migration chain can be tested against the exported schemas without a
+         * device. The individual migrations stay private — this is the list the builder registers,
+         * and the test drives the same one the app does, rather than a copy that could drift from
+         * it.
+         *
+         * Declared *after* the migrations themselves because Kotlin initialises properties in
+         * declaration order, and a list built from not-yet-initialised values throws.
+         */
+        internal val ALL_MIGRATIONS: List<Migration> = listOf(
+            MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7, MIGRATION_7_TO_8,
+            MIGRATION_8_TO_9, MIGRATION_9_TO_10, MIGRATION_10_TO_11, MIGRATION_11_TO_12,
+            MIGRATION_12_TO_13, MIGRATION_13_TO_14, MIGRATION_14_TO_15, MIGRATION_15_TO_16
+        )
     }
 }

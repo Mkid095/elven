@@ -37,6 +37,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -49,12 +50,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tickedge.data.deriv.DerivAccount
 import com.tickedge.data.local.UserProfileEntity
 import com.tickedge.data.model.ConnectionStatus
+import com.tickedge.ui.viewmodel.MainViewModel.LifetimeStats
+import com.tickedge.ui.viewmodel.MainViewModel.SyncState
 import com.tickedge.ui.components.ConnectionBadge
 import com.tickedge.ui.theme.BorderDark
 import com.tickedge.ui.theme.StatGreen
@@ -70,12 +74,27 @@ fun SettingsScreen(
     userProfile: UserProfileEntity,
     activeAccount: DerivAccount?,
     connectionStatus: ConnectionStatus,
+    syncState: SyncState,
+    /** The account's lifetime record, shown under the profile card. */
+    lifetimeStats: LifetimeStats = LifetimeStats(),
     onClearHistoryClick: () -> Unit,
     onSignOutClick: () -> Unit = {},
+    /** Saves the trader's display name. */
+    onSaveProfileName: (String) -> Unit = {},
+    /** Whether the TickEdge cloud account is signed in on this device. */
+    cloudSignedIn: Boolean = false,
+    /** The email the cloud account was created with, when [cloudSignedIn]. */
+    cloudEmail: String? = null,
+    /** Signs the device out of the TickEdge account (Deriv sign-in is kept). */
+    onCloudSignOutClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
+    // The name editor. Open on demand rather than always, because a permanent text field on the
+    // settings page invites accidental edits.
+    var showNameEditor by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf(userProfile.displayName) }
 
     LazyColumn(
         modifier = modifier
@@ -93,6 +112,8 @@ fun SettingsScreen(
                 color = TextPrimary
             )
         }
+
+        item { SyncStatusCard(syncState) }
 
         // Account Profile Card
         item {
@@ -123,10 +144,32 @@ fun SettingsScreen(
                             Icon(Icons.Default.Person, contentDescription = null, tint = VividYellow)
                         }
                         Column {
-                            Text(text = activeAccount?.displayName ?: "Trader", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                            // The trader's own name, with the Deriv account number underneath it.
+                            //
+                            // The account number is the identity the history is filed under, so it
+                            // belongs on screen — and the name is what Deriv does not always give,
+                            // which is why it can be edited here.
+                            Text(
+                                text = userProfile.displayName.ifBlank {
+                                    activeAccount?.displayName ?: "Trader"
+                                },
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                modifier = Modifier
+                                    .clickable {
+                                        nameDraft = userProfile.displayName
+                                        showNameEditor = true
+                                    }
+                                    .testTag("profile_name_toggle")
+                            )
                             Text(text = activeAccount?.id ?: "Not connected", fontSize = 12.sp, color = TextSecondary)
                             Text(
-                                text = String.format(Locale.US, "Balance: $%.2f", activeAccount?.balance ?: 0.0),
+                                // Same reasoning as the home card: an account that has not loaded
+                                // is not an account holding zero.
+                                text = activeAccount?.balance?.let {
+                                    String.format(Locale.US, "Balance: $%.2f", it)
+                                } ?: "Balance: loading…",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = VividYellow
@@ -134,9 +177,115 @@ fun SettingsScreen(
                         }
                     }
 
+                    // The name is editable because Deriv does not always give one. An account can
+                    // sign in with a blank name, and the app then shows a bare account number
+                    // everywhere a name would go — which reads as a bug rather than a missing
+                    // field the user can fill in.
+                    Text(
+                        text = if (showNameEditor) "Your name" else "Tap your name to change it",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
+                    if (showNameEditor) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = nameDraft,
+                                onValueChange = { nameDraft = it },
+                                label = { Text("Display name") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f).testTag("profile_name_input")
+                            )
+                            Button(
+                                onClick = {
+                                    onSaveProfileName(nameDraft)
+                                    showNameEditor = false
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = VividYellow,
+                                    contentColor = Color(0xFF101216)
+                                )
+                            ) {
+                                Text("Save", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
                     // No Top Up action: this app initiates and analyses trades only. Deposits
                     // and withdrawals happen in Deriv's own client, and offering a button here
                     // implied a funding integration that does not exist.
+                }
+            }
+        }
+
+        // The TickEdge cloud account. Free: email in, code by email, and the settings and
+        // trade history follow the email to the next phone. From Settings it can also be
+        // signed out of — the Deriv sign-in and the local records stay; only the link is
+        // dropped, so signing back in converges the same record again.
+        item {
+            CloudAccountCard(
+                signedIn = cloudSignedIn,
+                email = cloudEmail,
+                status = syncState,
+                emailText = "",
+                codeText = "",
+                codeSent = false,
+                onEmailChange = {},
+                onCodeChange = {},
+                onSendCode = {},
+                onVerify = {},
+                onSignOut = onCloudSignOutClick,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Lifetime record for the account: total made, total lost, net, over every settled trade.
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Since you started using TickEdge",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = VividYellow
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        LifetimeFigure(
+                            label = "Total profit",
+                            value = lifetimeStats.totalProfit,
+                            positive = true
+                        )
+                        LifetimeFigure(
+                            label = "Total loss",
+                            value = lifetimeStats.totalLoss,
+                            positive = false
+                        )
+                        LifetimeFigure(
+                            label = "Net result",
+                            value = lifetimeStats.netPnl,
+                            positive = null
+                        )
+                    }
+                    Text(
+                        text = if (lifetimeStats.settledTrades == 0)
+                            "No settled trades yet for this account."
+                        else
+                            "Over ${lifetimeStats.settledTrades} settled " +
+                                "${if (lifetimeStats.settledTrades == 1) "trade" else "trades"}.",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
                 }
             }
         }
@@ -198,8 +347,8 @@ fun SettingsScreen(
                     SettingsDivider()
                     SettingsRowItem(
                         icon = Icons.Default.Person,
-                        title = "Sign Out / Switch Account",
-                        subtitle = "Return to login screen",
+                        title = "Sign Out of This Account",
+                        subtitle = "Other Deriv accounts stay signed in",
                         iconTint = VividYellow,
                         onClick = onSignOutClick
                     )
@@ -367,6 +516,57 @@ private fun SettingsRowItem(
     }
 }
 
+/**
+ * Whether settings and trade history are actually reaching FIDScript.
+ *
+ * This exists because the sync state had no renderer at all: a failed save was as invisible as a
+ * successful one, which is how a write path that never worked went unnoticed. `Idle` deliberately
+ * says "off" rather than treating a missing session as an error — the app is fully usable with no
+ * cloud session, it just will not sync.
+ */
+@Composable
+private fun SyncStatusCard(syncState: SyncState) {
+    val (label, detail, tint) = when (syncState) {
+        is SyncState.Ready -> Triple(
+            "Cloud sync on",
+            "Settings and trade history are saved to your account.",
+            StatGreen
+        )
+        is SyncState.Connecting -> Triple("Cloud sync connecting", "Signing in to your account...", VividYellow)
+        is SyncState.Syncing -> Triple("Cloud sync syncing", "Moving settings and history to your account...", VividYellow)
+        // Not grey. This state previously said "off" with no explanation and was indistinguishable
+        // from a plain sign-out, so a broken sync looked like a deliberate choice. It carries the
+        // reason — most often a Deriv account authorised without the `openid` scope — because
+        // otherwise the user has no way to tell a configuration problem from normal operation.
+        is SyncState.Unavailable -> Triple(
+            "Cloud sync not connected",
+            syncState.reason,
+            VividYellow
+        )
+        is SyncState.Failed -> Triple("Cloud sync failed", syncState.reason, StatRed)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF13151D), RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Default.CloudDone,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(20.dp)
+        )
+        Column {
+            Text(text = label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = tint)
+            Text(text = detail, fontSize = 11.sp, color = TextSecondary)
+        }
+    }
+}
+
 @Composable
 private fun SettingsDivider() {
     Box(
@@ -375,4 +575,26 @@ private fun SettingsDivider() {
             .height(1.dp)
             .background(BorderDark)
     )
+}
+
+/** One lifetime figure. [positive] is null when the figure is neither a profit nor a loss. */
+@Composable
+private fun LifetimeFigure(
+    label: String,
+    value: Double,
+    positive: Boolean?
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = String.format(Locale.US, "$%.2f", value),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = when (positive) {
+                true -> StatGreen
+                false -> StatRed
+                null -> if (value >= 0) StatGreen else StatRed
+            }
+        )
+        Text(text = label, fontSize = 11.sp, color = TextSecondary)
+    }
 }

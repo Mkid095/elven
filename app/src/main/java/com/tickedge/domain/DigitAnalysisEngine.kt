@@ -132,6 +132,64 @@ object DigitAnalysisEngine {
     }
 
     /**
+     * Observed probability that the last digit finishes **over** [digit], read from the
+     * already-computed frequencies.
+     *
+     * The Over/Under recovery contracts settle on exactly this quantity, so it is what the entry
+     * condition must be compared against when the bot is trading recovery. Summing the buckets is
+     * deliberate rather than re-scanning ticks: recovery markets are swept every poll tick
+     * alongside the Differs markets, and this keeps both paths O(10).
+     */
+    fun overPercentFor(frequencies: List<DigitFrequency>, digit: Int): Double =
+        frequencies.filter { it.digit > digit }.sumOf { it.percentage }
+
+    /** Observed probability that the last digit finishes **under** [digit]. Mirror of [overPercentFor]. */
+    fun underPercentFor(frequencies: List<DigitFrequency>, digit: Int): Double =
+        frequencies.filter { it.digit < digit }.sumOf { it.percentage }
+
+    /**
+     * The observed percentage of the window that landed on an **even** last digit
+     * ({0,2,4,6,8}), read from the already-computed frequencies.
+     *
+     * The Even/Odd strategy's whole entry model rests on this: a DIGITEVEN contract settles on
+     * exactly this quantity. Summing the even buckets is deliberate rather than re-scanning ticks,
+     * mirroring [overPercentFor], so the sweep stays O(10).
+     */
+    fun evenPercentFor(frequencies: List<DigitFrequency>): Double =
+        frequencies.filter { it.digit % 2 == 0 }.sumOf { it.percentage }
+
+    /** Observed percentage of the window on an **odd** last digit ({1,3,5,7,9}). */
+    fun oddPercentFor(frequencies: List<DigitFrequency>): Double =
+        frequencies.filter { it.digit % 2 == 1 }.sumOf { it.percentage }
+
+    /**
+     * The observed percentage of whichever parity class is about to be traded.
+     *
+     * Single funnel for both classes so the entry condition, the analysis-event log and the UI
+     * read the same number: an Even trade is judged on P(even), an Odd trade on P(odd).
+     */
+    fun parityPercentFor(frequencies: List<DigitFrequency>, isEven: Boolean): Double =
+        if (isEven) evenPercentFor(frequencies) else oddPercentFor(frequencies)
+
+    /**
+     * The observed percentage for whichever contract is about to be traded.
+     *
+     * One funnel for both trade types so the entry condition, the recovery condition and the UI all
+     * read the same number: a Differs contract is judged on P(≠ digit), an Over/Under contract on
+     * P(> barrier) or P(< barrier) — which is the probability that contract actually pays out on.
+     */
+    fun observedPercentForTrade(
+        frequencies: List<DigitFrequency>,
+        targetDigit: Int,
+        isRecovery: Boolean,
+        isOver: Boolean
+    ): Double = when {
+        !isRecovery -> differsPercentFor(frequencies, targetDigit)
+        isOver -> overPercentFor(frequencies, targetDigit)
+        else -> underPercentFor(frequencies, targetDigit)
+    }
+
+    /**
      * Resolves the observed percentage for the configured [AnalysisMetric].
      *
      * Single funnel so the trading engine and the analysis-event log can never disagree about what
@@ -145,6 +203,9 @@ object DigitAnalysisEngine {
         AnalysisMetric.DIFFERS_PERCENT -> differsPercentFor(frequencies, targetDigit)
         AnalysisMetric.EQUALS_PERCENT ->
             frequencies.firstOrNull { it.digit == targetDigit }?.percentage ?: 0.0
+        // [targetDigit] is the parity-class sentinel here (0 = even, 9 = odd), not a digit.
+        AnalysisMetric.EVEN_ODD_PERCENT ->
+            parityPercentFor(frequencies, targetDigit == PARITY_EVEN_SENTINEL)
     }
 
     /**

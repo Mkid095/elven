@@ -1,0 +1,957 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 16,
+    "identityHash": "f02274257a9bd76c6ae70d79e559f4bf",
+    "entities": [
+      {
+        "tableName": "profiles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `displayName` TEXT NOT NULL, `email` TEXT NOT NULL, `simulatedBalance` REAL NOT NULL, `liveBalance` REAL NOT NULL, `demoBalance` REAL NOT NULL, `activeAccount` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "email",
+            "columnName": "email",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "simulatedBalance",
+            "columnName": "simulatedBalance",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "liveBalance",
+            "columnName": "liveBalance",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "demoBalance",
+            "columnName": "demoBalance",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeAccount",
+            "columnName": "activeAccount",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "user_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `userId` TEXT NOT NULL, `windowSize` INTEGER NOT NULL, `selectedDigit` INTEGER NOT NULL, `recoveryDigit` INTEGER NOT NULL, `recoveryDirection` TEXT NOT NULL, `comparisonOperator` TEXT NOT NULL, `thresholdPercent` REAL NOT NULL, `recoveryComparisonOperator` TEXT NOT NULL, `recoveryThresholdPercent` REAL NOT NULL, `analysisMetric` TEXT NOT NULL, `digitSelectionMode` TEXT NOT NULL, `minimumSampleSize` INTEGER NOT NULL, `stakeAmount` REAL NOT NULL, `takeProfit` REAL NOT NULL, `stopLoss` REAL NOT NULL, `durationUnit` TEXT NOT NULL, `durationValue` INTEGER NOT NULL, `martingaleEnabled` INTEGER NOT NULL, `tradeType` TEXT NOT NULL, `randomMarkets` INTEGER NOT NULL, `maxTradesPerMarket` INTEGER NOT NULL, `maxDailyLoss` REAL NOT NULL, `stopTradingOnLimit` INTEGER NOT NULL, `realArmed` INTEGER NOT NULL, `requirePerOrderConfirm` INTEGER NOT NULL, `maxMartingaleSteps` INTEGER NOT NULL, `selectedStrategyId` TEXT NOT NULL, `liveRiskAcknowledged` INTEGER NOT NULL, `evenOddMode` TEXT NOT NULL, `evenOddOperator` TEXT NOT NULL, `evenOddThreshold` REAL NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`userId`, `id`), FOREIGN KEY(`userId`) REFERENCES `profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "windowSize",
+            "columnName": "windowSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "selectedDigit",
+            "columnName": "selectedDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryDigit",
+            "columnName": "recoveryDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryDirection",
+            "columnName": "recoveryDirection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "comparisonOperator",
+            "columnName": "comparisonOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thresholdPercent",
+            "columnName": "thresholdPercent",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryComparisonOperator",
+            "columnName": "recoveryComparisonOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryThresholdPercent",
+            "columnName": "recoveryThresholdPercent",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "analysisMetric",
+            "columnName": "analysisMetric",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "digitSelectionMode",
+            "columnName": "digitSelectionMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "minimumSampleSize",
+            "columnName": "minimumSampleSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stakeAmount",
+            "columnName": "stakeAmount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "takeProfit",
+            "columnName": "takeProfit",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stopLoss",
+            "columnName": "stopLoss",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationUnit",
+            "columnName": "durationUnit",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationValue",
+            "columnName": "durationValue",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "martingaleEnabled",
+            "columnName": "martingaleEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "tradeType",
+            "columnName": "tradeType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "randomMarkets",
+            "columnName": "randomMarkets",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxTradesPerMarket",
+            "columnName": "maxTradesPerMarket",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxDailyLoss",
+            "columnName": "maxDailyLoss",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stopTradingOnLimit",
+            "columnName": "stopTradingOnLimit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "realArmed",
+            "columnName": "realArmed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "requirePerOrderConfirm",
+            "columnName": "requirePerOrderConfirm",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxMartingaleSteps",
+            "columnName": "maxMartingaleSteps",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "selectedStrategyId",
+            "columnName": "selectedStrategyId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "liveRiskAcknowledged",
+            "columnName": "liveRiskAcknowledged",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddMode",
+            "columnName": "evenOddMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddOperator",
+            "columnName": "evenOddOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddThreshold",
+            "columnName": "evenOddThreshold",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "userId",
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_user_settings_userId",
+            "unique": false,
+            "columnNames": [
+              "userId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_user_settings_userId` ON `${TABLE_NAME}` (`userId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "userId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "analysis_events",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `userId` TEXT NOT NULL, `marketSymbol` TEXT NOT NULL, `targetDigit` INTEGER NOT NULL, `windowSize` INTEGER NOT NULL, `sampleSize` INTEGER NOT NULL, `occurrenceCount` INTEGER NOT NULL, `observedPercent` REAL NOT NULL, `analysisMetric` TEXT NOT NULL, `comparisonOperator` TEXT NOT NULL, `thresholdPercent` REAL NOT NULL, `conditionMet` INTEGER NOT NULL, `eventTimestamp` INTEGER NOT NULL, FOREIGN KEY(`userId`) REFERENCES `profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketSymbol",
+            "columnName": "marketSymbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDigit",
+            "columnName": "targetDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "windowSize",
+            "columnName": "windowSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampleSize",
+            "columnName": "sampleSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "occurrenceCount",
+            "columnName": "occurrenceCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedPercent",
+            "columnName": "observedPercent",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "analysisMetric",
+            "columnName": "analysisMetric",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "comparisonOperator",
+            "columnName": "comparisonOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "thresholdPercent",
+            "columnName": "thresholdPercent",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "conditionMet",
+            "columnName": "conditionMet",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "eventTimestamp",
+            "columnName": "eventTimestamp",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_analysis_events_userId",
+            "unique": false,
+            "columnNames": [
+              "userId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_analysis_events_userId` ON `${TABLE_NAME}` (`userId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "userId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "simulation_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `userId` TEXT NOT NULL, `accountId` TEXT NOT NULL, `isReal` INTEGER NOT NULL, `strategy` TEXT NOT NULL, `strategyId` TEXT NOT NULL, `targetDigit` INTEGER NOT NULL, `initialSimulatedBalance` REAL NOT NULL, `currentSimulatedBalance` REAL NOT NULL, `status` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `endedAt` INTEGER, `totalTrades` INTEGER NOT NULL, `winCount` INTEGER NOT NULL, `lossCount` INTEGER NOT NULL, `netProfit` REAL NOT NULL, `grossProfit` REAL NOT NULL, `grossLoss` REAL NOT NULL, `totalStaked` REAL NOT NULL, FOREIGN KEY(`userId`) REFERENCES `profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isReal",
+            "columnName": "isReal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategy",
+            "columnName": "strategy",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategyId",
+            "columnName": "strategyId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDigit",
+            "columnName": "targetDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "initialSimulatedBalance",
+            "columnName": "initialSimulatedBalance",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentSimulatedBalance",
+            "columnName": "currentSimulatedBalance",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "startedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endedAt",
+            "columnName": "endedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "totalTrades",
+            "columnName": "totalTrades",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "winCount",
+            "columnName": "winCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lossCount",
+            "columnName": "lossCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "netProfit",
+            "columnName": "netProfit",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grossProfit",
+            "columnName": "grossProfit",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grossLoss",
+            "columnName": "grossLoss",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalStaked",
+            "columnName": "totalStaked",
+            "affinity": "REAL",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_simulation_sessions_userId",
+            "unique": false,
+            "columnNames": [
+              "userId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_sessions_userId` ON `${TABLE_NAME}` (`userId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "userId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "simulation_positions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `userId` TEXT NOT NULL, `sessionId` INTEGER NOT NULL, `marketSymbol` TEXT NOT NULL, `marketName` TEXT NOT NULL, `scenarioType` TEXT NOT NULL, `simulatedStake` REAL NOT NULL, `simulatedPayout` REAL NOT NULL, `simulatedNetResult` REAL NOT NULL, `outcome` TEXT NOT NULL, `targetDigit` INTEGER NOT NULL, `entryQuote` REAL NOT NULL, `exitQuote` REAL NOT NULL, `exitDigit` INTEGER NOT NULL, `openedAt` INTEGER NOT NULL, `settledAt` INTEGER NOT NULL, `accountId` TEXT NOT NULL, `contractId` TEXT NOT NULL, `isReal` INTEGER NOT NULL, `syncedToCloud` INTEGER NOT NULL, `askPrice` REAL NOT NULL, `payoutRatio` REAL, `recoveryStep` INTEGER NOT NULL, `outstandingBefore` REAL NOT NULL, `strategyId` TEXT NOT NULL, FOREIGN KEY(`userId`) REFERENCES `profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketSymbol",
+            "columnName": "marketSymbol",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "marketName",
+            "columnName": "marketName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scenarioType",
+            "columnName": "scenarioType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "simulatedStake",
+            "columnName": "simulatedStake",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "simulatedPayout",
+            "columnName": "simulatedPayout",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "simulatedNetResult",
+            "columnName": "simulatedNetResult",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outcome",
+            "columnName": "outcome",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetDigit",
+            "columnName": "targetDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "entryQuote",
+            "columnName": "entryQuote",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exitQuote",
+            "columnName": "exitQuote",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "exitDigit",
+            "columnName": "exitDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "openedAt",
+            "columnName": "openedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "settledAt",
+            "columnName": "settledAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contractId",
+            "columnName": "contractId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isReal",
+            "columnName": "isReal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "syncedToCloud",
+            "columnName": "syncedToCloud",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "askPrice",
+            "columnName": "askPrice",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payoutRatio",
+            "columnName": "payoutRatio",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "recoveryStep",
+            "columnName": "recoveryStep",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outstandingBefore",
+            "columnName": "outstandingBefore",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategyId",
+            "columnName": "strategyId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_simulation_positions_userId",
+            "unique": false,
+            "columnNames": [
+              "userId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_positions_userId` ON `${TABLE_NAME}` (`userId`)"
+          },
+          {
+            "name": "index_simulation_positions_accountId",
+            "unique": false,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_positions_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          },
+          {
+            "name": "index_simulation_positions_sessionId",
+            "unique": false,
+            "columnNames": [
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_positions_sessionId` ON `${TABLE_NAME}` (`sessionId`)"
+          },
+          {
+            "name": "index_simulation_positions_userId_accountId",
+            "unique": false,
+            "columnNames": [
+              "userId",
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_positions_userId_accountId` ON `${TABLE_NAME}` (`userId`, `accountId`)"
+          },
+          {
+            "name": "index_simulation_positions_userId_sessionId",
+            "unique": false,
+            "columnNames": [
+              "userId",
+              "sessionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_simulation_positions_userId_sessionId` ON `${TABLE_NAME}` (`userId`, `sessionId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "userId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "strategy_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`userId` TEXT NOT NULL, `strategyId` TEXT NOT NULL, `differsDigit` INTEGER NOT NULL, `differsDigitMode` TEXT NOT NULL, `differsOperator` TEXT NOT NULL, `differsThreshold` REAL NOT NULL, `recoveryDirection` TEXT NOT NULL, `recoveryDigit` INTEGER NOT NULL, `recoveryOperator` TEXT NOT NULL, `recoveryThreshold` REAL NOT NULL, `evenOddMode` TEXT NOT NULL, `evenOddOperator` TEXT NOT NULL, `evenOddThreshold` REAL NOT NULL, `stakeAmount` REAL NOT NULL, `takeProfit` REAL NOT NULL, `stopLoss` REAL NOT NULL, `durationUnit` TEXT NOT NULL, `durationValue` INTEGER NOT NULL, `martingaleEnabled` INTEGER NOT NULL, `analysisWindow` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`userId`, `strategyId`), FOREIGN KEY(`userId`) REFERENCES `profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "strategyId",
+            "columnName": "strategyId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "differsDigit",
+            "columnName": "differsDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "differsDigitMode",
+            "columnName": "differsDigitMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "differsOperator",
+            "columnName": "differsOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "differsThreshold",
+            "columnName": "differsThreshold",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryDirection",
+            "columnName": "recoveryDirection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryDigit",
+            "columnName": "recoveryDigit",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryOperator",
+            "columnName": "recoveryOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryThreshold",
+            "columnName": "recoveryThreshold",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddMode",
+            "columnName": "evenOddMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddOperator",
+            "columnName": "evenOddOperator",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evenOddThreshold",
+            "columnName": "evenOddThreshold",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stakeAmount",
+            "columnName": "stakeAmount",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "takeProfit",
+            "columnName": "takeProfit",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stopLoss",
+            "columnName": "stopLoss",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationUnit",
+            "columnName": "durationUnit",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationValue",
+            "columnName": "durationValue",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "martingaleEnabled",
+            "columnName": "martingaleEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "analysisWindow",
+            "columnName": "analysisWindow",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "userId",
+            "strategyId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_strategy_settings_userId",
+            "unique": false,
+            "columnNames": [
+              "userId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_strategy_settings_userId` ON `${TABLE_NAME}` (`userId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "profiles",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "userId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f02274257a9bd76c6ae70d79e559f4bf')"
+    ]
+  }
+}

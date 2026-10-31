@@ -5,6 +5,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+        The foreground service is what keeps the bot trading when the app is not in front.
+
+        Without it the OS is free to freeze the app the moment it is backgrounded: the sockets stop
+        receiving, an open contract is never settled, and the stake the user already paid for is
+        never recorded. With it, the process stays alive and visible as a notification, and the
+        trading loop — which lives in TradingRuntime, outside the Activity — carries on.
+
+        FOREGROUND_SERVICE_DATA_SYNC is the type this service runs under (Android 14+ requires the
+        type to be declared in both the permission and the manifest).
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -72,6 +87,19 @@
                     android:scheme="elven" />
             </intent-filter>
         </activity>
+
+        <!--
+            Keeps the process alive and visible while the bot trades. Not exported: nothing outside
+            the app has any business starting or stopping the user's trading session.
+
+            foregroundServiceType="dataSync" is required on Android 14+ and must match the
+            FOREGROUND_SERVICE_DATA_SYNC permission above.
+        -->
+        <service
+            android:name=".domain.TradingService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
     </application>
 
 </manifest>

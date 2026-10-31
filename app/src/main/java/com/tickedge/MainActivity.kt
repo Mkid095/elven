@@ -1,10 +1,15 @@
 package com.tickedge
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -26,6 +31,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,17 +39,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.tickedge.data.model.AccountType
 import com.tickedge.ui.screens.AnalysisScreen
 import com.tickedge.ui.screens.AuthScreen
 import com.tickedge.ui.screens.HistoryScreen
 import com.tickedge.ui.screens.HomeScreen
 import com.tickedge.ui.screens.SettingsScreen
+import com.tickedge.ui.screens.StrategyPickerScreen
 import com.tickedge.ui.screens.TradeScreen
 import com.tickedge.ui.screens.TradeSettingsScreen
 import com.tickedge.ui.theme.BorderDark
@@ -70,6 +80,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshAuthState()
+        // The trading socket is torn down when the app backgrounds, so anything that moved while
+        // we were away — including trades placed from another device — is only picked up here.
+        viewModel.refreshAccounts()
     }
 }
 
@@ -85,6 +98,36 @@ fun TickEdgeApp(
 ) {
     val authState by viewModel.authState.collectAsStateWithLifecycle()
     val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    val context = LocalContext.current
+
+    // The running-trading notification.
+    //
+    // Android 13 requires POST_NOTIFICATIONS before anything can appear in the shade. Without it
+    // the bot still runs in the background — the foreground service still keeps the process alive
+    // — but the user is told nothing, which for a bot spending their money is the worst of both
+    // worlds: it keeps trading silently.
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        // A refusal is not treated as an error. The bot still trades; the user simply does not get
+        // the running indicator. Blocking trading on it would take away the app's main function
+        // over a cosmetic setting.
+        if (!granted) {
+            android.util.Log.i("MainActivity", "Notifications declined — trading still runs, " +
+                "but the running indicator will not be shown")
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     val currentScreen by viewModel.currentScreen.collectAsStateWithLifecycle()
     val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
@@ -105,27 +148,66 @@ fun TickEdgeApp(
     val recentTradeOutcome by viewModel.recentTradeOutcome.collectAsStateWithLifecycle()
     val pastPositions by viewModel.pastPositions.collectAsStateWithLifecycle()
     val activeAccount by viewModel.activeAccount.collectAsStateWithLifecycle()
+    val isBalanceLive by viewModel.isBalanceLive.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
     val realArmed by viewModel.realArmed.collectAsStateWithLifecycle()
     val pendingConfirmation by viewModel.pendingConfirmation.collectAsStateWithLifecycle()
     val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
+    // Every session this user has run, for the Sessions & Days tab.
+    val sessions by viewModel.sessions.collectAsStateWithLifecycle()
+    // History is scoped to the account in use, so switching demo/live switches the record with it.
+    val accountPositions by viewModel.accountPositions.collectAsStateWithLifecycle()
+    val accountSessions by viewModel.accountSessions.collectAsStateWithLifecycle()
     val sessionSummary by viewModel.sessionSummary.collectAsStateWithLifecycle()
     val lastConfirmedTrade by viewModel.lastConfirmedTrade.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
+    // Why the bot halted by itself. Null while it is running, and after the user pressed Stop.
+    val stopNotice by viewModel.stopNotice.collectAsStateWithLifecycle()
+    val syncState by viewModel.syncState.collectAsStateWithLifecycle()
+    // The TickEdge cloud account: whether this device is signed in, and whose email it is.
+    val cloudSignedIn by viewModel.cloudSignedIn.collectAsStateWithLifecycle()
+    val cloudEmail by viewModel.cloudEmail.collectAsStateWithLifecycle()
+    // The one-time warning that replaces a per-order confirmation on live trades.
+    val liveRiskDialog by viewModel.liveRiskDialog.collectAsStateWithLifecycle()
+    // What the current balance cannot cover, checked before the user presses Start.
+    val preflightWarning by viewModel.preflightWarning.collectAsStateWithLifecycle()
 
     // Gate the authenticated experience on the real auth state
     if (authState !is com.tickedge.auth.AuthState.Authenticated) {
         AuthScreen(
             authState = authState,
-            onContinueWithDeriv = { activity?.let { viewModel.launchDerivAuth(it) } }
+            onContinueWithDeriv = { activity?.let { viewModel.launchDerivAuth(it) } },
+            cloudSignedIn = cloudSignedIn,
+            cloudEmail = cloudEmail,
+            cloudStatus = syncState,
+            onSendMagicCode = { viewModel.sendCloudMagicCode(it) },
+            onVerifyCode = { email, code -> viewModel.verifyCloudMagicCode(email, code) },
+            onSignUpVerify = { first, last, user, email, code ->
+                viewModel.signUpCloudAccount(first, last, user, email, code)
+            },
+            onCloudSignOut = { viewModel.signOutCloud() }
         )
         return
     }
+
+    // The strategy the user is running. Everything about the menu comes from it.
+    //
+    // The bar used to be a hard-coded list, so "the app" and "the strategy" were the same thing
+    // and a second strategy would have needed a second app. Each strategy now names its own
+    // routes, and the icons are resolved from a route → icon table — a strategy that has no
+    // Analysis tab simply does not list one.
+    val strategy by viewModel.selectedStrategy.collectAsStateWithLifecycle()
 
     // Back handlers
     BackHandler(enabled = currentScreen == "trade_settings") {
         viewModel.navigateTo("trade")
     }
-    BackHandler(enabled = currentScreen != "home" && currentScreen != "trade_settings") {
+    // Back from the strategy list returns to the app rather than leaving it — the user arrived
+    // here from inside, and backing out of the app entirely would look like the list is a dead end.
+    BackHandler(enabled = currentScreen == "strategies") {
+        viewModel.navigateTo(strategy.defaultRoute)
+    }
+    BackHandler(enabled = currentScreen != "home" && currentScreen != "trade_settings" && currentScreen != "strategies") {
         viewModel.navigateTo("home")
     }
 
@@ -137,6 +219,10 @@ fun TickEdgeApp(
         NavItem("settings", "Settings", Icons.Default.Settings)
     )
 
+    val visibleNavItems = strategy.navItems.mapNotNull { item ->
+        navItems.firstOrNull { it.route == item.route }?.copy(title = item.label)
+    }
+
     // Calculate PnL & Win Rate from real settled records (no fabricated defaults)
     val dayAgo = System.currentTimeMillis() - 86_400_000L
     val allTimePnl = pastPositions.sumOf { it.simulatedNetResult }
@@ -146,8 +232,9 @@ fun TickEdgeApp(
     val winRate = if (settledCount > 0) winCount * 100 / settledCount else 0
     val totalTrades = pastPositions.size
 
-    // Hide bottom navigation when in full-page trade settings
-    val showBottomBar = currentScreen != "trade_settings"
+    // Hide bottom navigation when in full-page trade settings, and on the strategy list — which is
+    // a page above the app rather than a page within it, so it carries no menu of its own.
+    val showBottomBar = currentScreen != "trade_settings" && currentScreen != "strategies"
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -162,6 +249,8 @@ fun TickEdgeApp(
                         .border(1.dp, BorderDark, RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                 ) {
                     navItems.forEach { item ->
+                        // Only the current strategy's own routes are shown.
+                        if (visibleNavItems.none { it.route == item.route }) return@forEach
                         val isSelected = currentScreen == item.route
                         NavigationBarItem(
                             selected = isSelected,
@@ -200,10 +289,27 @@ fun TickEdgeApp(
                 .padding(innerPadding)
         ) {
             when (currentScreen) {
+                // The strategy list — the first page after signing in, and where the app says
+                // what it can do.
+                "strategies" -> StrategyPickerScreen(
+                    strategies = viewModel.strategies,
+                    selectedStrategyId = viewModel.selectedStrategyId.collectAsStateWithLifecycle().value,
+                    // What each strategy has done so far, so the list says which ones are running
+                    // and what they have made — the same figures the notification carries.
+                    runStates = viewModel.runStates.collectAsStateWithLifecycle().value,
+                    onSelect = { viewModel.selectStrategy(it) },
+                    anyRunning = viewModel.runStates.collectAsStateWithLifecycle().value.values.any { it.isRunning },
+                    onStopAll = { viewModel.stopAllTrading() },
+                    onSignOut = { viewModel.derivLogout() },
+                    traderName = userProfile.displayName.ifBlank { activeAccount?.displayName ?: "Trader" }
+                )
                 "home" -> HomeScreen(
                     userProfile = userProfile,
                     activeAccount = activeAccount,
                     activeAccountType = activeAccountType,
+                    isBalanceLive = isBalanceLive,
+                    isSyncing = isSyncing,
+                    onSyncBalances = viewModel::syncBalances,
                     statsPeriod = statsPeriod,
                     marketsState = marketsState,
                     overallConnection = overallConnection,
@@ -217,21 +323,40 @@ fun TickEdgeApp(
                         viewModel.selectMarket(symbol)
                         viewModel.navigateTo("analysis")
                     },
-                    onNavigateToTrade = { viewModel.navigateTo("trade") }
+                    onNavigateToTrade = { viewModel.navigateTo("trade") },
+                    // The running strategy's live figures, so the bar says what it has done —
+                    // the same numbers the notification carries.
+                    strategyRunState = viewModel.runStates.collectAsStateWithLifecycle().value[strategy.id],
+                    strategy = strategy,
+                    onOpenStrategies = { viewModel.openStrategyPicker() },
+                    // The Deriv account manager: which account is signed in, and how to change it.
+                    derivSlots = viewModel.derivSlots.collectAsStateWithLifecycle().value,
+                    activeSlotId = viewModel.activeSlotId.collectAsStateWithLifecycle().value,
+                    onSelectDerivAccount = viewModel::switchDerivAccount,
+                    onAddDerivAccount = {
+                        activity?.let { viewModel.addDerivAccount(it) }
+                    },
+                    onSignOutDerivAccount = viewModel::signOutDerivAccount
                 )
                 "analysis" -> AnalysisScreen(
                     marketsState = marketsState,
                     selectedSymbol = selectedSymbol,
-                    targetDigit = tradeSettings.targetDigit,
                     inspectedDigit = inspectedDigit,
+                    strategyId = strategy.id,
                     onMarketSelected = { viewModel.selectMarket(it) },
                     onDigitSelected = { viewModel.setInspectedDigit(it) },
                     onWindowSizeChanged = { viewModel.setWindowSize(it) }
                 )
                 "trade" -> TradeScreen(
+                    strategy = strategy,
+                    isBalanceLive = isBalanceLive,
+                    isSyncing = isSyncing,
+                    onSyncBalances = viewModel::syncBalances,
                     simulatorState = simulatorState,
                     activeTrade = activeTrade,
                     scanState = scanState,
+                    stopNotice = stopNotice,
+                    onDismissStopNotice = viewModel::dismissStopNotice,
                     nextTrade = nextTrade,
                     consecutiveLosses = consecutiveLosses,
                     recentTradeOutcome = recentTradeOutcome,
@@ -247,9 +372,14 @@ fun TickEdgeApp(
                     onNavigateToHistory = { viewModel.navigateTo("history") },
                     onDismissOutcomeBanner = { viewModel.dismissOutcomeBanner() },
                     onConfirmOrder = { viewModel.resolveConfirmation(it) },
-                    onToggleRealArmed = { viewModel.setRealArmed(it) }
+                    onSwitchAccount = { viewModel.setRealArmed(it == AccountType.LIVE) },
+                    showLiveRiskDialog = liveRiskDialog,
+                    onAcceptLiveRisk = viewModel::acceptLiveRisk,
+                    onDeclineLiveRisk = viewModel::declineLiveRisk,
+                    preflightWarning = preflightWarning
                 )
                 "trade_settings" -> TradeSettingsScreen(
+                    strategy = strategy,
                     currentSettings = tradeSettings,
                     onBackClick = { viewModel.navigateTo("trade") },
                     onSaveSettings = { updated ->
@@ -257,17 +387,29 @@ fun TickEdgeApp(
                     }
                 )
                 "history" -> HistoryScreen(
+                    // Both accounts' records, not just the one in use. The screen partitions them
+                    // into separate blocks — live above demo, each with its own totals and border —
+                    // so every record stays visible without ever being summed together.
                     positions = pastPositions,
+                    sessions = sessions,
                     activeSession = activeSession,
                     sessionSummary = sessionSummary,
-                    lastConfirmedTrade = lastConfirmedTrade
+                    lastConfirmedTrade = lastConfirmedTrade,
+                    activeAccountIsReal = activeAccountType == AccountType.LIVE
                 )
                 "settings" -> SettingsScreen(
                     userProfile = userProfile,
                     activeAccount = activeAccount,
                     connectionStatus = overallConnection,
+                    syncState = syncState,
+                    // The account's lifetime record — total profit, total loss, net — since first use.
+                    lifetimeStats = viewModel.lifetimeStats.collectAsStateWithLifecycle().value,
                     onClearHistoryClick = { viewModel.clearHistory() },
-                    onSignOutClick = { viewModel.derivLogout() }
+                    onSignOutClick = { viewModel.derivLogout() },
+                    onSaveProfileName = viewModel::saveProfileDisplayName,
+                    cloudSignedIn = cloudSignedIn,
+                    cloudEmail = cloudEmail,
+                    onCloudSignOutClick = { viewModel.signOutCloud() }
                 )
             }
         }

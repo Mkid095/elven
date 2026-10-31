@@ -29,6 +29,15 @@ enum class ComparisonOperator(val symbol: String, val label: String) {
 }
 
 /**
+ * Whether the condition is met by a percentage *at or above* the threshold.
+ *
+ * Used for the progress bars, which read 0-100 left to right: a "below the threshold" entry still
+ * fills the bar as the reading approaches, it just compares the other way.
+ */
+val ComparisonOperator.isAtLeast: Boolean
+    get() = this == ComparisonOperator.GREATER_THAN || this == ComparisonOperator.GREATER_OR_EQUAL
+
+/**
  * Which probability the entry threshold is measured against.
  *
  * The app buys `DIGITDIFF`, which Deriv settles as a win when the last digit of the final tick is
@@ -40,7 +49,9 @@ enum class ComparisonOperator(val symbol: String, val label: String) {
  */
 enum class AnalysisMetric(val symbol: String, val label: String) {
     DIFFERS_PERCENT("differs_pct", "Differs % (≠ digit)"),
-    EQUALS_PERCENT("equals_pct", "Equals % (digit)")
+    EQUALS_PERCENT("equals_pct", "Equals % (digit)"),
+    /** The Even/Odd parity class' percentage of the window (50% is neutral). */
+    EVEN_ODD_PERCENT("even_odd_pct", "Even/Odd % (parity)")
 }
 
 /**
@@ -57,7 +68,23 @@ enum class DigitSelectionMode(val symbol: String, val label: String) {
 
 enum class TradeType(val displayName: String) {
     DIFFERS("Differs (Main)"),
-    OVER_UNDER("Over & Under (Recovery)")
+    OVER_UNDER("Over & Under (Recovery)"),
+    EVEN_ODD("Even / Odd")
+}
+
+/**
+ * How the Even/Odd entry picks its class.
+ *
+ * [AUTO] evaluates both parities each sweep and trades whichever one clears the threshold — the
+ * "qualifier" — so a market with no qualifying class does not trade. [EVEN] and [ODD] pin the
+ * class and trade it when its own percentage clears the threshold.
+ *
+ * [symbol] is persisted, so it must stay stable across renames.
+ */
+enum class EvenOddMode(val symbol: String, val label: String) {
+    AUTO("auto", "Auto (whichever clears)"),
+    EVEN("even", "Always Even"),
+    ODD("odd", "Always Odd")
 }
 
 enum class TradeDurationUnit(val label: String, val shortLabel: String) {
@@ -138,23 +165,81 @@ data class MarketState(
 
 data class TradeSettings(
     val targetDigit: Int = 2,
-    val recoveryDigit: Int = 4,
+    /** Primary recovery barrier. Default Over 2. */
+    val recoveryDigit: Int = 2,
     val recoveryDirection: String = "OVER", // "OVER" or "UNDER"
-    val comparisonOperator: ComparisonOperator = ComparisonOperator.GREATER_THAN,
-    val thresholdPercent: Double = 70.0,
+    /**
+     * Entry condition for a **Differs** trade: [thresholdPercent] compared to P(≠ digit).
+     *
+     * Kept separate from [recoveryComparisonOperator] / [recoveryThresholdPercent] because the two
+     * contract types are measured on scales that have nothing to do with each other. P(≠ digit)
+     * sits near 90% on any fair tick stream, and the default asks for it to be **below** 85 — which
+     * only happens when the target digit is running unusually hot. That is a deliberate strategy,
+     * not a stricter version of the old one: a single shared number could never have been sensible
+     * for both scales, since the same threshold that is rare on a ~90% baseline is unremarkable on
+     * a ~50% one.
+     */
+    val comparisonOperator: ComparisonOperator = ComparisonOperator.LESS_THAN,
+    val thresholdPercent: Double = 85.0,
+    /**
+     * Entry condition for an **Over/Under recovery** trade: P(> barrier) or P(< barrier),
+     * whichever [recoveryDirection] selects.
+     *
+     * Above 80% by default, for both directions. The two conditions are deliberately opposite
+     * in shape — Differs wants a below-test on its ~90% scale, recovery wants an above-test on its
+     * ~50% one — which is only expressible because they are separate fields.
+     */
+    val recoveryComparisonOperator: ComparisonOperator = ComparisonOperator.GREATER_THAN,
+    val recoveryThresholdPercent: Double = 80.0,
+    /**
+     * Whether a failed recovery rung switches the ladder to the alternate barrier, or keeps
+     * hammering the same one.
+     *
+     * Off by default: repeating the same contract after it has just lost is how a ladder digs
+     * deeper into the same hole. Turning it on alternates Over/Under on the alternate barrier
+     * instead, which changes the contract rather than the size.
+     */
+    val recoveryAlternates: Boolean = false,
+    /** Barrier used when [recoveryAlternates] is on and the ladder has already switched once. */
+    val recoveryAlternateDigit: Int = 7,
+    val recoveryAlternateDirection: String = "UNDER",
     /** Which probability [thresholdPercent] is compared against. See [AnalysisMetric]. */
     val analysisMetric: AnalysisMetric = AnalysisMetric.DIFFERS_PERCENT,
     /** Whether [targetDigit] is fixed, or redrawn per market opportunity. See [DigitSelectionMode]. */
-    val digitSelectionMode: DigitSelectionMode = DigitSelectionMode.FIXED,
+    val digitSelectionMode: DigitSelectionMode = DigitSelectionMode.RANDOM,
     /** How many recent ticks the analysis is computed over (1..1000). */
-    val analysisWindowSize: Int = 100,
+    val analysisWindowSize: Int = 15,
     val stakeAmount: Double = 0.35,
     val takeProfit: Double = 10.0,
     val stopLoss: Double = 10.0,
     val durationUnit: TradeDurationUnit = TradeDurationUnit.TICKS,
     val durationValue: Int = 1,
-    val martingaleEnabled: Boolean = true
-)
+    val martingaleEnabled: Boolean = true,
+    /**
+     * The Even/Odd entry class. See [EvenOddMode]. Only read when the active strategy is
+     * Even/Odd; the Differs strategy ignores it.
+     */
+    val evenOddMode: EvenOddMode = EvenOddMode.AUTO,
+    /**
+     * Above/below for the Even/Odd entry: [evenOddThreshold] compared against the observed
+     * percentage of the qualifying parity class. "Above" bets the hot class (even ran 60% of
+     * the window, threshold 55% → buy Even); "Below" bets the cold class for a mean-reversion
+     * read.
+     */
+    val evenOddOperator: ComparisonOperator = ComparisonOperator.GREATER_THAN,
+    /** The Even/Odd entry threshold, in percentage points. */
+    val evenOddThreshold: Double = 55.0
+) {
+    /**
+     * The threshold and operator that apply to the contract about to be traded.
+     *
+     * One function so the sweep, the analysis-event log and the UI cannot each pick the wrong pair
+     * for the trade type in hand — the disagreement between them was the original defect.
+     */
+    fun conditionFor(isRecovery: Boolean): Pair<ComparisonOperator, Double> =
+        if (isRecovery) recoveryComparisonOperator to recoveryThresholdPercent
+        else comparisonOperator to thresholdPercent
+}
 
 data class SystemConfig(
     val randomMarkets: Boolean = true,
