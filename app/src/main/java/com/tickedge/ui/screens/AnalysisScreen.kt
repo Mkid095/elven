@@ -502,49 +502,24 @@ fun AnalysisScreen(
 
         // ================= EVEN / ODD ANALYSIS — Even/Odd strategy only =================
         //
-        // The whole parity read on one screen: which side of the last digit is running hot over
-        // the selected market's window, and — when the user taps a digit in the list below — how
-        // often that digit has appeared in *each* of the five markets. Every market state carries
-        // its own digitFrequencies, so the breakdown needs no new engine work.
+        // Numbers are what is observed; even/odd is what the numbers add up to. So the view is
+        // number-first:
+        // 1. Every number 0-9 individually — how often THAT number ended the last tick in this
+        //    market's window (% and count).
+        // 2. The roll-up — how much the even numbers (0,2,4,6,8) accounted for in total, and how
+        //    much the odd numbers (1,3,5,7,9) did. That pair is what the strategy bets on: the
+        //    next tick's digit being even or odd on this market.
+        // All numbers are for the market selected in the chips above, over its own window set in
+        // the "Ticks to Analyze" control.
         if (isEvenOddStrategy && currentTab == EVEN_ODD_TAB) {
             val evenPct = DigitAnalysisEngine.evenPercentFor(currentMarket.digitFrequencies)
             val oddPct = DigitAnalysisEngine.oddPercentFor(currentMarket.digitFrequencies)
             val hotIsEven = evenPct >= oddPct
 
+            // 1 — Every number, individually.
             item {
                 Text(
-                    text = "Even / Odd · ${currentMarket.shortName}",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextSecondary
-                )
-            }
-
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    ParityCard(
-                        title = "Even digits (0,2,4,6,8)",
-                        percentage = evenPct,
-                        sampleSize = currentMarket.sampleSize,
-                        isHot = hotIsEven
-                    )
-                    ParityCard(
-                        title = "Odd digits (1,3,5,7,9)",
-                        percentage = oddPct,
-                        sampleSize = currentMarket.sampleSize,
-                        isHot = !hotIsEven
-                    )
-                }
-            }
-
-            // The 0-9 list, each digit labelled with its parity. Tapping one opens its
-            // all-markets breakdown.
-            item {
-                Text(
-                    text = "Digits — tap one for its all-markets breakdown",
+                    text = "Each number · ${currentMarket.shortName}",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = TextSecondary
@@ -555,6 +530,8 @@ fun AnalysisScreen(
                 Column(modifier = Modifier.fillMaxWidth()) {
                     (0..9).forEach { d ->
                         val isSelected = d == selectedDigit
+                        val f = currentMarket.digitFrequencies.firstOrNull { it.digit == d }
+                        val hasData = currentMarket.sampleSize >= 10
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -583,97 +560,70 @@ fun AnalysisScreen(
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = if (d % 2 == 0) "Even" else "Odd",
+                                text = if (d % 2 == 0) "Even number" else "Odd number",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = if (d % 2 == 0) StatGreen else StatRed
                             )
                             Spacer(modifier = Modifier.weight(1f))
-                            val f = currentMarket.digitFrequencies.firstOrNull { it.digit == d }
                             Text(
-                                text = if (currentMarket.sampleSize >= 10) {
-                                    String.format(Locale.US, "%.1f%% · %d ticks", f?.percentage ?: 0.0, f?.count ?: 0)
+                                text = if (hasData) {
+                                    String.format(
+                                        Locale.US,
+                                        "%.1f%% · %d of %d ticks",
+                                        f?.percentage ?: 0.0,
+                                        f?.count ?: 0,
+                                        currentMarket.sampleSize
+                                    )
                                 } else {
                                     "no data yet"
                                 },
                                 fontSize = 11.sp,
-                                color = TextSecondary
+                                color = if (hasData) TextPrimary else TextSecondary
                             )
                         }
                     }
                 }
             }
 
-            // The all-markets breakdown for the tapped digit.
-            selectedDigit?.let { d ->
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
-                        shape = RoundedCornerShape(14.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("digit_breakdown_${d}")
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text(
-                                text = "Digit $d (${if (d % 2 == 0) "Even" else "Odd"}) · all markets",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = VividYellow
-                            )
-                            Text(
-                                text = "How often $d ended the last tick of each market, over that " +
-                                    "market's own window.",
-                                fontSize = 10.sp,
-                                color = TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            SupportedMarkets.ALL.forEach { def ->
-                                val state = marketsState[def.symbol]
-                                val f = state?.digitFrequencies?.firstOrNull { it.digit == d }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = def.displayName,
-                                        fontSize = 11.sp,
-                                        color = TextPrimary,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (state != null && state.sampleSize >= 10 && f != null) {
-                                        Text(
-                                            text = String.format(
-                                                Locale.US, "%.1f%% · %d of %d",
-                                                f.percentage, f.count, state.sampleSize
-                                            ),
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = if (f.percentage >= 20.0) StatGreen else TextPrimary
-                                        )
-                                    } else {
-                                        Text(
-                                            text = "no data yet",
-                                            fontSize = 11.sp,
-                                            color = TextSecondary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+            // 2 — The roll-up: what the even numbers and the odd numbers together make up.
+            item {
+                Text(
+                    text = "Roll-up · even numbers vs odd numbers",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextSecondary
+                )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    ParityCard(
+                        title = "Even numbers, combined",
+                        percentage = evenPct,
+                        sampleSize = currentMarket.sampleSize,
+                        isHot = hotIsEven
+                    )
+                    ParityCard(
+                        title = "Odd numbers, combined",
+                        percentage = oddPct,
+                        sampleSize = currentMarket.sampleSize,
+                        isHot = !hotIsEven
+                    )
                 }
             }
 
             item {
                 Text(
-                    text = "The Even/Odd strategy trades the side that clears its percentage in " +
-                        "Trade Settings. An \"above\" condition bets the hot side; a \"below\" " +
-                        "condition bets the cold one. Percentages describe the window already " +
-                        "counted, not the next tick.",
+                    text = "Even and odd are not numbers themselves: the even % is what the " +
+                        "numbers 0,2,4,6,8 made up in total, and the odd % what 1,3,5,7,9 did. " +
+                        "The strategy bets on that roll-up — that the next tick's digit on this " +
+                        "market will be even or odd. \"Above\" bets the hot side; \"below\" the " +
+                        "cold one. All figures describe the window already counted, not a " +
+                        "prediction of the next tick.",
                     fontSize = 10.sp,
                     color = TextSecondary.copy(alpha = 0.75f)
                 )

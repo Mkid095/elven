@@ -136,6 +136,16 @@ fun HistoryScreen(
         else -> if (pos.scenarioType.contains("Differs")) "Differs" else "O/U"
     }
 
+    /**
+     * The last-column value: for Differs the digit IS the bet, so the digit. For Even/Odd the
+     * bet is the parity class, not any digit — 0/9 is only the encoding on disk, and printing
+     * it reads as "the bot bet on 9" when it actually bet "Even" on the whole market.
+     */
+    fun betLabel(pos: SimulationPositionEntity): String = when (strategyOf(pos)) {
+        "even_odd" -> if (pos.targetDigit == 0) "Even" else "Odd"
+        else -> if (pos.targetDigit >= 0) pos.targetDigit.toString() else "—"
+    }
+
     // Both accounts are on screen at once, in separate blocks with the live block above the demo
     // block.
     //
@@ -320,7 +330,7 @@ fun HistoryScreen(
                             Text(text = "Time", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(42.dp))
                             Text(text = "Market", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(56.dp))
                             Text(text = "Type", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(52.dp))
-                            Text(text = "Digit", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(38.dp))
+                            Text(text = "Bet", fontSize = 12.sp, color = TextSecondary, modifier = Modifier.width(38.dp))
                             Text(text = "P/L", fontSize = 12.sp, color = TextSecondary)
                         }
                     }
@@ -378,13 +388,12 @@ fun HistoryScreen(
                                         color = TextSecondary,
                                         modifier = Modifier.width(52.dp)
                                     )
-                                    // The digit this trade was actually placed on. It was recorded
-                                    // on every position row but never shown in the list, so a trade
-                                    // read as "some trade on some market" — and for a Differs
-                                    // contract the digit *is* the bet. Shown here so the list says
-                                    // what was traded without being opened.
+                                    // What the trade actually bet: for a Differs contract the digit
+                                    // IS the bet, so the digit; for an Even/Odd contract the bet is
+                                    // the parity class, and printing the 0/9 encoding would read as
+                                    // "the bot bet on 9" — which it did not.
                                     Text(
-                                        text = if (pos.targetDigit >= 0) pos.targetDigit.toString() else "—",
+                                        text = betLabel(pos),
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = VividYellow,
@@ -755,7 +764,17 @@ private fun TradeDetailSheet(
 
             Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 DetailRow("Strategy", strategyLabel)
-                DetailRow("Prediction / barrier", "digit ${trade.targetDigit}")
+                DetailRow(
+                    "Prediction / barrier",
+                    if (strategyLabel.startsWith("Even")) {
+                        // A parity trade has no digit barrier: it bet "the next tick is even"
+                        // (or odd) on the whole market. Saying "digit 9" would describe a bet
+                        // that was never placed.
+                        if (trade.targetDigit == 0) "Even class" else "Odd class"
+                    } else {
+                        "digit ${trade.targetDigit}"
+                    }
+                )
                 DetailRow("Stake", String.format(Locale.US, "$%.2f", trade.simulatedStake))
                 DetailRow(
                     "Price paid",

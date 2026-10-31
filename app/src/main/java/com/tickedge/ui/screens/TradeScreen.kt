@@ -440,15 +440,17 @@ fun TradeScreen(
                         Text(
                             text = when (nextTrade.tradeType) {
                                 TradeType.EVEN_ODD -> {
+                                    // A parity bet is on the market's next tick, not on any digit:
+                                    // say which side and which market.
                                     val side =
                                         if (nextTrade.targetDigit == PARITY_EVEN_SENTINEL) "Even" else "Odd"
-                                    "Even / Odd ($side)" +
-                                        if (nextTrade.isRecovery) ", recovery step ${nextTrade.recoveryStep}" else ""
+                                    "$side on ${nextTrade.marketName}" +
+                                        if (nextTrade.isRecovery) " · recovery step ${nextTrade.recoveryStep}" else ""
                                 }
                                 TradeType.OVER_UNDER ->
-                                    "Over & Under (${nextTrade.recoveryDirection} ${nextTrade.targetDigit}), " +
-                                        "recovery step ${nextTrade.recoveryStep}"
-                                else -> "Differs (≠ ${nextTrade.targetDigit})"
+                                    "Over & Under (${nextTrade.recoveryDirection} ${nextTrade.targetDigit}) " +
+                                        "on ${nextTrade.marketName} · recovery step ${nextTrade.recoveryStep}"
+                                else -> "Differs (≠ ${nextTrade.targetDigit}) on ${nextTrade.marketName}"
                             },
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
@@ -457,13 +459,8 @@ fun TradeScreen(
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.End
                         ) {
-                            Text(
-                                text = nextTrade.marketName,
-                                fontSize = 12.sp,
-                                color = TextSecondary
-                            )
                             Text(
                                 text = if (nextTrade.livePayout)
                                     "Win $${String.format(Locale.US, "%.2f", nextTrade.ifWinNet)}"
@@ -747,16 +744,16 @@ private fun PositionDetail(
             return@Column
         }
 
+        val paritySide = if (trade.targetDigit == PARITY_EVEN_SENTINEL) "Even" else "Odd"
         val mode = when {
             isParity -> {
-                val side =
-                    if (trade.targetDigit == PARITY_EVEN_SENTINEL) "Even" else "Odd"
-                "Even / Odd ($side)" +
+                // The parity bet is "the next tick is even/odd on this market" — no digit.
+                "Bets $paritySide on ${trade.marketName}" +
                     if (trade.isRecoveryMode) " [Recovery rung ${trade.recoveryStep}]" else " [Base]"
             }
             trade.isRecoveryMode ->
-                "Over & Under (${trade.recoveryDirection} ${trade.targetDigit}) [Recovery rung ${trade.recoveryStep}]"
-            else -> "Differs (≠ ${trade.targetDigit}) [Base]"
+                "Over & Under (${trade.recoveryDirection} ${trade.targetDigit}) on ${trade.marketName} [Recovery rung ${trade.recoveryStep}]"
+            else -> "Differs (≠ ${trade.targetDigit}) on ${trade.marketName} [Base]"
         }
 
         TradeInfoRow(label = "Market:", value = trade.marketName)
@@ -765,7 +762,11 @@ private fun PositionDetail(
             value = mode,
             valueColor = if (trade.isRecoveryMode) VividYellow else TextPrimary
         )
-        TradeInfoRow(label = "Target Number:", value = trade.targetDigit.toString())
+        if (isParity) {
+            TradeInfoRow(label = "Betting:", value = paritySide)
+        } else {
+            TradeInfoRow(label = "Target Number:", value = trade.targetDigit.toString())
+        }
         TradeInfoRow(label = "Stake:", value = String.format(Locale.US, "$ %.2f", trade.currentStake))
         TradeInfoRow(label = "Status:", value = trade.statusText, valueColor = VividYellow)
     }
