@@ -22,3 +22,9 @@ debug.keystore
 .env
 .env.*
 !.env.example
+
+# Local scratch — tooling and database dumps, never commit
+/tools/
+
+# Local build-log output
+/build_check.log
