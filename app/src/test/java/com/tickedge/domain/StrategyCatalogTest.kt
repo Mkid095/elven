@@ -78,4 +78,23 @@ class StrategyCatalogTest {
             )
         }
     }
+
+    @Test
+    fun `every strategy states a risk label that is not blank`() {
+        // A risk label that is empty or a blank word is the same as no label: the user would be
+        // trading blind to the strategy's risk. Guard the shape, not the exact figures.
+        StrategyCatalog.ALL.forEach { strategy ->
+            assertTrue("${strategy.id} has a blank risk tier", strategy.risk.tier.isNotBlank())
+            assertTrue("${strategy.id} has a blank win rate", strategy.risk.winRate.isNotBlank())
+            assertTrue("${strategy.id} has a blank risk label", strategy.risk.label.isNotBlank())
+        }
+    }
+
+    @Test
+    fun `the two strategies' risk tiers differ`() {
+        // If both read the same the label carries no information: a trader cannot tell which
+        // strategy is the riskier one. The figures the user approved are deliberately different.
+        val tiers = StrategyCatalog.ALL.map { it.risk.tier }.toSet()
+        assertEquals("the two strategies should not share a risk tier", 2, tiers.size)
+    }
 }

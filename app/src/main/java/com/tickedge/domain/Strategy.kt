@@ -44,8 +44,33 @@ data class StrategyDefinition(
      *
      * Part of the definition rather than a separate document, so a strategy cannot ship without one.
      */
-    val guide: StrategyGuide
+    val guide: StrategyGuide,
+    /**
+     * The risk the strategy carries, stated plainly.
+     *
+     * A tier ("Low risk" / "High risk") and an approximate win rate, so the numbers sit next to
+     * every trade the strategy places rather than staying in a user's head. Part of the
+     * definition like [guide], so a strategy cannot ship without saying what it risks.
+     */
+    val risk: StrategyRisk
 )
+
+/**
+ * A strategy's risk, in words a trader understands.
+ *
+ * The win rate is deliberately approximate — the `~` says the number is a long-run tendency of
+ * the market the strategy plays, not a guarantee, and the figures here are the ones the user
+ * accepted when choosing which risks to show.
+ */
+data class StrategyRisk(
+    /** The tier, shown alone where there is no room for a full line. */
+    val tier: String,
+    /** The approximate win rate, shown next to the tier. */
+    val winRate: String
+) {
+    /** "Low risk · ~83% win rate" — the full line, for surfaces with room. */
+    val label: String get() = "$tier · $winRate"
+}
 
 /** One entry in a strategy's menu. */
 data class StrategyNavItem(
@@ -85,7 +110,8 @@ object StrategyCatalog {
             StrategyNavItem("settings", "Settings")
         ),
         defaultRoute = "home",
-        guide = StrategyGuides.DIFFERS_WITH_RECOVERY
+        guide = StrategyGuides.DIFFERS_WITH_RECOVERY,
+        risk = StrategyRisk("Low risk", "~83% win rate")
     )
 
     /**
@@ -115,7 +141,8 @@ object StrategyCatalog {
             StrategyNavItem("settings", "Settings")
         ),
         defaultRoute = "home",
-        guide = StrategyGuides.EVEN_ODD
+        guide = StrategyGuides.EVEN_ODD,
+        risk = StrategyRisk("High risk", "~50% win rate")
     )
 
     /** Every strategy the app offers, in the order the picker lists them. */

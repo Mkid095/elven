@@ -9,6 +9,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -252,9 +253,158 @@ class InstantDbClient(
     suspend fun deleteEntity(entityId: String): Result<TxnResult> =
         transact(listOf(JSONArray().put(OP_DELETE).put(entityId)))
 
+    /**
+     * Enumerate every entity id in a namespace that the current user can see.
+     *
+     * Rows are permission-scoped to `auth.id == data.userId`, so this returns only the signed-in
+     * user's rows — the app can never enumerate (let alone delete) another user's record. A global
+     * wipe of every user's cloud rows is an operator/admin step, not something this client can do.
+     */
+    suspend fun entityIdsIn(namespace: String): Result<List<String>> {
+        val rows = query(namespace).getOrNull() ?: return Result.success(emptyList())
+        return Result.success(rows.map { it.entityId }.distinct())
+    }
+
+    /**
+     * Delete every row in a namespace the current user owns.
+     *
+     * Queries the namespace for its entity ids, then deletes each. This is how the "start from a
+     * clean record" reset clears the cloud half of the history for the signed-in user; the local
+     * Room wipe is separate and is what this pairs with.
+     */
+    suspend fun deleteAllIn(namespace: String): Result<Int> {
+        val ids = entityIdsIn(namespace).getOrNull() ?: return Result.success(0)
+        var deleted = 0
+        for (id in ids) {
+            if (deleteEntity(id).isSuccess) deleted++
+        }
+        return Result.success(deleted)
+    }
+
     /** Remove a single attribute from an entity. */
     suspend fun retractTriple(entityId: String, attrId: String): Result<TxnResult> =
         transact(listOf(JSONArray().put(OP_RETRACT).put(entityId).put(attrId)))
+
+    /**
+     * Create or update one row of `sessions`.
+     *
+     * This is the live session a phone publishes so its siblings see the same record: written as
+     * ACTIVE when it opens, re-written with running totals while it trades, and re-written as
+     * COMPLETED with its final figures when it closes. Keyed on a deterministic [InstantDbClient.sessionEntityId],
+     * so a session opened on one phone and pulled on another resolve to the same row.
+     */
+    suspend fun upsertSession(
+        userId: String,
+        entityId: String,
+        fields: Map<String, Any?>
+    ): Result<TxnResult> {
+        val resolved = fields.entries.mapNotNull { (name, value) ->
+            if (value == null) return@mapNotNull null
+            val attrId = sessionAttr(name)
+                ?: return Result.failure(IllegalArgumentException("Unknown sessions attribute: $name"))
+            attrId to value
+        }
+        if (resolved.isEmpty()) return Result.failure(IllegalArgumentException("sessions write had no fields"))
+
+        // userId first, for the same reason as the other upserts: the row's permission check
+        // depends on it, so a write that reaches the server without it is rejected outright.
+        val steps = mutableListOf<JSONArray>()
+        resolved.firstOrNull { it.first == FidscriptAttrs.SESSIONS_USERID }
+            ?.let { steps += step(OP_MERGE, entityId, it.first, it.second) }
+        resolved.filter { it.first != FidscriptAttrs.SESSIONS_USERID }
+            .forEach { (attrId, value) -> steps += step(OP_MERGE, entityId, attrId, value) }
+        steps += step(OP_MERGE, entityId, FidscriptAttrs.SESSIONS_ID, entityId)
+        return transact(steps)
+    }
+
+    /**
+     * Tell every other signed-in device to stop trading, on the shared `run_control` channel.
+     *
+     * Each device's poll reads this row and, when [stopRequested] is set and newer than the one it
+     * last saw, stops its own engines and clears the flag. That is the "stop on one phone, stop on
+     * the other."
+     */
+    suspend fun requestRunStop(fidUserId: String): Result<TxnResult> {
+        val entityId = controlEntityId(fidUserId)
+        val now = System.currentTimeMillis()
+        val steps = listOf(
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_USERID, fidUserId),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_STOPREQUESTED, true),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_STOPREQUESTEDAT, now),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_UPDATEDAT, now),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_ID, entityId)
+        )
+        return transact(steps)
+    }
+
+    /** Clear the stop request, so a later one is the one that fires. */
+    suspend fun clearRunStop(fidUserId: String): Result<TxnResult> {
+        val entityId = controlEntityId(fidUserId)
+        val now = System.currentTimeMillis()
+        val steps = listOf(
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_USERID, fidUserId),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_STOPREQUESTED, false),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_UPDATEDAT, now),
+            step(OP_MERGE, entityId, FidscriptAttrs.RUN_CONTROL_ID, entityId)
+        )
+        return transact(steps)
+    }
+
+    /**
+     * Read every row of [namespace] back as one map per entity: `{entityId: {attrName: value}}`.
+     *
+     * The query path returns a flat join-row stream; this groups it so a caller can ask "give me
+     * the session with sessionId 7" without re-walking the wire shape. Attribute ids are resolved
+     * back to names against the sessions / run_control namespaces (trade_history falls through to
+     * ids).
+     */
+    suspend fun readNamespace(namespace: String): Result<Map<String, Map<String, Any?>>> =
+        query(namespace).map { rows ->
+            val byEntity = LinkedHashMap<String, LinkedHashMap<String, Any?>>()
+            rows.forEach { row ->
+                val name = attributeName(namespace, row.attrId, row.entityId)
+                byEntity.getOrPut(row.entityId) { LinkedHashMap() }[name] = row.value
+            }
+            byEntity.mapValues { it.value }
+        }
+
+    /** Map a `sessions` field name to its attribute id. */
+    private fun sessionAttr(name: String): String? = when (name) {
+        "userId" -> FidscriptAttrs.SESSIONS_USERID
+        "sessionId" -> FidscriptAttrs.SESSIONS_SESSIONID
+        "strategyId" -> FidscriptAttrs.SESSIONS_STRATEGYID
+        "strategy" -> FidscriptAttrs.SESSIONS_STRATEGY
+        "isReal" -> FidscriptAttrs.SESSIONS_ISREAL
+        "accountId" -> FidscriptAttrs.SESSIONS_ACCOUNTID
+        "status" -> FidscriptAttrs.SESSIONS_STATUS
+        "startedAt" -> FidscriptAttrs.SESSIONS_STARTEDAT
+        "endedAt" -> FidscriptAttrs.SESSIONS_ENDEDAT
+        "totalTrades" -> FidscriptAttrs.SESSIONS_TOTALTRADES
+        "winCount" -> FidscriptAttrs.SESSIONS_WINCOUNT
+        "lossCount" -> FidscriptAttrs.SESSIONS_LOSSCOUNT
+        "netProfit" -> FidscriptAttrs.SESSIONS_NETPROFIT
+        "grossProfit" -> FidscriptAttrs.SESSIONS_GROSSPROFIT
+        "grossLoss" -> FidscriptAttrs.SESSIONS_GROSSLOSS
+        "totalStaked" -> FidscriptAttrs.SESSIONS_TOTALSTAKED
+        "initialSimulatedBalance" -> FidscriptAttrs.SESSIONS_INITIALSIMULATEDBALANCE
+        "currentSimulatedBalance" -> FidscriptAttrs.SESSIONS_CURRENTSIMULATEDBALANCE
+        "updatedAt" -> FidscriptAttrs.SESSIONS_UPDATEDAT
+        else -> null
+    }
+
+    /**
+     * Resolve an attribute id back to a readable name.
+     *
+     * Only the two namespaced families (sessions, run_control) are reverse-mapped; everything else
+     * — trade_history, the `id` triple itself — falls back to the raw id, so a caller always gets
+     * *something* it can key on rather than a lost row.
+     */
+    private fun attributeName(namespace: String, attrId: String, entityId: String): String =
+        when (namespace) {
+            FidscriptAttrs.NS_SESSIONS -> sessionToName[attrId] ?: attrId
+            FidscriptAttrs.NS_RUN_CONTROL -> runControlToName[attrId] ?: attrId
+            else -> attrId
+        }
 
     // --------------------------------------------------------------- helpers
 
@@ -384,6 +534,56 @@ class InstantDbClient(
          */
         fun tradeEntityId(contractId: String): String =
             UUID.nameUUIDFromBytes("tickedge:trade:$contractId".toByteArray()).toString()
+
+        /**
+         * Stable FIDScript entity id for one trading session.
+         *
+         * Keyed on the Room session id, so a session this device opens and one pulled from the
+         * cloud resolve to the same row regardless of which device did the writing — which is
+         * exactly the invariant two devices need to see one session, not two.
+         */
+        fun sessionEntityId(sessionId: Long): String =
+            UUID.nameUUIDFromBytes("tickedge:session:$sessionId".toByteArray()).toString()
+
+        /**
+         * Stable FIDScript entity id for a person's run-control row.
+         *
+         * The shared stop flag is per-person, like the settings row: one row, written by any
+         * device, read by all of them.
+         */
+        fun controlEntityId(fidUserId: String): String =
+            UUID.nameUUIDFromBytes("tickedge:control:$fidUserId".toByteArray()).toString()
+
+        /** Attribute id -> field name, for the `sessions` namespace. */
+        val sessionToName: Map<String, String> = mapOf(
+            FidscriptAttrs.SESSIONS_ID to "id",
+            FidscriptAttrs.SESSIONS_USERID to "userId",
+            FidscriptAttrs.SESSIONS_SESSIONID to "sessionId",
+            FidscriptAttrs.SESSIONS_STRATEGYID to "strategyId",
+            FidscriptAttrs.SESSIONS_STRATEGY to "strategy",
+            FidscriptAttrs.SESSIONS_ISREAL to "isReal",
+            FidscriptAttrs.SESSIONS_ACCOUNTID to "accountId",
+            FidscriptAttrs.SESSIONS_STATUS to "status",
+            FidscriptAttrs.SESSIONS_STARTEDAT to "startedAt",
+            FidscriptAttrs.SESSIONS_ENDEDAT to "endedAt",
+            FidscriptAttrs.SESSIONS_TOTALTRADES to "totalTrades",
+            FidscriptAttrs.SESSIONS_WINCOUNT to "winCount",
+            FidscriptAttrs.SESSIONS_LOSSCOUNT to "lossCount",
+            FidscriptAttrs.SESSIONS_NETPROFIT to "netProfit",
+            FidscriptAttrs.SESSIONS_GROSSPROFIT to "grossProfit",
+            FidscriptAttrs.SESSIONS_GROSSLOSS to "grossLoss",
+            FidscriptAttrs.SESSIONS_TOTALSTAKED to "totalStaked",
+            FidscriptAttrs.SESSIONS_UPDATEDAT to "updatedAt"
+        )
+
+        /** Attribute id -> field name, for the `run_control` namespace. */
+        val runControlToName: Map<String, String> = mapOf(
+            FidscriptAttrs.RUN_CONTROL_ID to "id",
+            FidscriptAttrs.RUN_CONTROL_USERID to "userId",
+            FidscriptAttrs.RUN_CONTROL_STOPREQUESTED to "stopRequested",
+            FidscriptAttrs.RUN_CONTROL_STOPREQUESTEDAT to "stopRequestedAt",
+            FidscriptAttrs.RUN_CONTROL_UPDATEDAT to "updatedAt"
+        )
     }
 }
 

@@ -6,6 +6,53 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
+ * A scheduled run: when a strategy should start and stop on its own, with no person at the phone.
+ *
+ * This is what makes the bot run unattended overnight — the phone stays the trader (the Deriv
+ * token lives in the Android Keystore, not on a server), and the schedule is what wakes the app at
+ * the right moment and boots a headless run. The scheduler receiver reads these rows to know what
+ * to start; the Room row is the source of truth so the schedule survives a restart.
+ *
+ * [startAt] is a fixed epoch-millis time for a one-shot. For [recurring] windows the two are
+ * ignored in favour of [timeOfDay] (a "HH:mm" string, local) plus the recurrence rule, and the
+ * scheduler re-arms itself for the next occurrence after each fire.
+ */
+@Entity(tableName = "scheduled_runs")
+data class ScheduledRunEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val userId: String = "",
+    /** The [com.tickedge.domain.StrategyCatalog] id this schedule drives. */
+    val strategyId: String,
+    /** A short label the user gave, shown in the schedule list. */
+    val label: String = "",
+    /** For a one-shot: when to start. For recurring: unused. */
+    val startAt: Long = 0L,
+    /** For a one-shot: when to stop. 0 means "stop on the next take-profit / stop-loss". */
+    val stopAt: Long = 0L,
+    /**
+     * Which kind of schedule this is.
+     *
+     *  - "once": fire at [startAt], stop at [stopAt] (0 = run until a risk limit or the user stops).
+     *  - "daily": start at [timeOfDay] every day, stop after [durationMinutes] minutes.
+     *  - "weekly": start at [timeOfDay] on [dayOfWeek] (1 = Sunday .. 7 = Saturday), stop after
+     *    [durationMinutes] minutes.
+     */
+    val recurring: String = "once",
+    /** "HH:mm" in local time, used by the recurring kinds. */
+    val timeOfDay: String = "",
+    /** 1 = Sunday .. 7 = Saturday; only used when [recurring] is "weekly". */
+    val dayOfWeek: Int = 1,
+    /** How many minutes a recurring run stays open before the scheduler stops it. */
+    val durationMinutes: Int = 60,
+    /** Whether this schedule is armed. Paused schedules are kept but never fire. */
+    val enabled: Boolean = true,
+    /** Which account kind the run trades on: "DEMO" or "REAL". */
+    val accountKind: String = "DEMO",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+/**
  * Local profile per user. Balances are NOT seeded here: live balances come from the real
  * Deriv accounts (see DerivClient). Fields default to neutral/zero.
  *

@@ -237,8 +237,13 @@ fun HomeScreen(
                         color = VividYellow
                     )
                     if (strategyRunState != null && strategyRunState.trades > 0) {
+                        // This is the *current run's* figure — the in-memory counter for the run
+                        // that is active right now, not the session total or the all-time record.
+                        // Saying "this run" keeps it from being read as the session's or the
+                        // account's P&L, which the History page computes from settled trades.
                         Text(
-                            text = "${strategyRunState.status.label} · " +
+                            text = "This run · " +
+                                "${strategyRunState.status.label} · " +
                                 "${strategyRunState.tradesLabel} · ${strategyRunState.pnlLabel}",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,

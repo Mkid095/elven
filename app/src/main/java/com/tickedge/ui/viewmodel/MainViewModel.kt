@@ -2,6 +2,11 @@ package com.tickedge.ui.viewmodel
 
 import android.app.Application
 import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tickedge.auth.AccountSlotRegistry
@@ -18,7 +23,9 @@ import com.tickedge.data.instant.InstantDbClient
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.AnalysisEventEntity
 import com.tickedge.data.local.LastTradeRow
+import com.tickedge.data.local.LifetimeStatsRow
 import com.tickedge.data.local.SessionSummary
+import com.tickedge.data.local.ScheduledRunEntity
 import com.tickedge.data.local.SimulationPositionEntity
 import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.local.StrategySettingsEntity
@@ -478,6 +485,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     drainTradeHistoryToCloud(session.userId)
                     pullTradeHistoryFromCloud(session.userId)
                     _syncState.value = SyncState.Ready(session.userId)
+                    startCloudLoops()
                 }
                 .onFailure { error ->
                     _syncState.value = SyncState.Failed(error.message ?: "Sign-in failed.")
@@ -512,6 +520,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     drainTradeHistoryToCloud(session.userId)
                     pullTradeHistoryFromCloud(session.userId)
                     _syncState.value = SyncState.Ready(session.userId)
+                    startCloudLoops()
                 }
                 .onFailure { error ->
                     _syncState.value = SyncState.Failed(error.message ?: "Sign-in failed.")
@@ -549,6 +558,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             pullTradeHistoryFromCloud(stored.userId)
             _syncState.value = SyncState.Ready(stored.userId)
         }
+        startCloudLoops()
+    }
+
+    /**
+     * Bring up the two cloud loops that make a record *shared* rather than per-phone.
+     *
+     *  - the stop watch: a stop pressed on another signed-in device stops this one;
+     *  - the progress mirror: a session's running P&L is re-published so the other device sees it move.
+     *
+     * Both are no-ops without a cloud session (the runtime guards on it), so calling this every time
+     * the session becomes Ready is safe — the loops themselves are start-once.
+     */
+    private fun startCloudLoops() {
+        runtime.startCloudStopWatch()
+        runtime.startSessionProgressMirror()
     }
 
     /**
@@ -1141,29 +1165,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * The Settings page is where they live, because the requirement is "since they started using
      * the application" — the whole record, not the session or the day.
+     *
+     * Computed by SQL ([LifetimeStatsRow]) rather than from the positions list, which is why the
+     * figure can no longer read as the newest-200: the aggregate counts the entire record.
      */
     data class LifetimeStats(
         val totalProfit: Double = 0.0,
         val totalLoss: Double = 0.0,
         val netPnl: Double = 0.0,
-        val settledTrades: Int = 0
+        val settledTrades: Int = 0,
+        val winCount: Int = 0
     )
 
-    val lifetimeStats: StateFlow<LifetimeStats> = pastPositions
-        .map { positions ->
-            val settled = positions.filter {
-                it.outcome == "WON" || it.outcome == "LOST"
-            }
+    val lifetimeStats: StateFlow<LifetimeStats> = userId
+        .flatMapLatest { id -> db.simulationDao().getLifetimeStats(id) }
+        .map { row ->
             LifetimeStats(
-                totalProfit = settled.filter { it.simulatedNetResult > 0 }
-                    .sumOf { it.simulatedNetResult },
-                totalLoss = -settled.filter { it.simulatedNetResult < 0 }
-                    .sumOf { it.simulatedNetResult },
-                netPnl = settled.sumOf { it.simulatedNetResult },
-                settledTrades = settled.size
+                totalProfit = row.totalProfit,
+                totalLoss = row.totalLoss,
+                netPnl = row.netPnl,
+                settledTrades = row.settledTrades,
+                winCount = row.winCount
             )
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LifetimeStats())
+
+    /**
+     * How many trades the user has, ever — the Home "trades" figure.
+     *
+     * A SQL COUNT, not the positions list's `size`: the list is capped (it has to be, or the
+     * history page would load the whole record on every screen), and `size` on a capped list
+     * reads as the true total. The COUNT is cheap and exact.
+     */
+    val tradeCount: StateFlow<Int> = userId
+        .flatMapLatest { id -> db.simulationDao().observeTradeCount(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     // ---------------------------------------------------------------- trading sessions
 
@@ -1440,6 +1476,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         observeAnalysisThresholds()
         keepBalancesFresh()
         observeTradesForCloudSync()
+        // Re-arm any saved schedules the moment the app opens, so a device that was killed or
+        // rebooted picks its overnight windows back up without the user re-saving them. The
+        // BOOT_COMPLETED receiver does the same from the other side; this is the path that
+        // catches "the user just re-opened the app."
+        reArmSchedules()
     }
 
     /**
@@ -1503,19 +1544,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Mirror settled trades upward as they land.     *
-     * Driven off the positions flow rather than a hook in the trading engine, so the upload is
-     * idempotent and the engine needs no knowledge of the cloud. The flow re-emits on every insert;
-     * each pass only picks up rows still flagged unsynced, so re-emitting costs one cheap query.
+     * Mirror settled trades upward as they land.
+     *
+     * Driven off a COUNT of the outbox, not off the positions list. The list re-emits on every
+     * insert, and a drain wired to that list used to set off up to fifty sequential uploads on
+     * every single new row — the main cause of the History page freezing. The outbox COUNT
+     * changes only when the set of unsynced rows changes (an insert adds one, `markSynced`
+     * removes one), so the drain fires exactly when there is something to send and stays quiet
+     * otherwise. The first emission is the backlog already in Room — trades taken before this
+     * launch or before the app was ever signed in — and those are exactly the ones that need
+     * uploading.
      */
     private fun observeTradesForCloudSync() {
         viewModelScope.launch {
-            // No `drop(1)`. The first emission is the backlog already in Room — trades taken before
-            // this launch, or before the app was ever signed in — and those are exactly the ones
-            // need uploading. Dropping it would leave them stranded until some later insert happened
-            // to wake the collector. Harmless to re-check on every emission: the drain only selects
-            // rows still flagged unsynced, so a repeated pass costs one indexed query.
-            pastPositions.collect { flushTradeHistory() }
+            userId.flatMapLatest { id -> db.simulationDao().countUnsyncedUploadable(id) }
+                .collect { pending -> if (pending > 0) flushTradeHistory() }
         }
     }
 
@@ -1858,6 +1901,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistSettings()
     }
 
+    // --------------------------------------------------------------- scheduled runs
+
+    /** Every schedule the signed-in user has, live so the settings card updates on save. */
+    val scheduledRuns: StateFlow<List<ScheduledRunEntity>> = userId
+        .flatMapLatest { id -> db.scheduledRunDao().getForUser(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Save a schedule and re-arm the alarms that make it fire.
+     *
+     * The save and the re-arm are one gesture: a schedule that is written but whose alarm is not
+     * (re)armed is a schedule that will never run, which is the exact opposite of the feature.
+     * Arming is fired at [com.tickedge.domain.ScheduleAlarmReceiver] so it also happens after a
+     * reboot, from the same receiver, without the app being open.
+     */
+    fun saveScheduledRun(run: ScheduledRunEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = run.copy(userId = currentUserId)
+            if (run.id == 0L) {
+                db.scheduledRunDao().insert(stored)
+            } else {
+                db.scheduledRunDao().update(stored)
+            }
+            reArmSchedules()
+        }
+    }
+
+    /**
+     * Pause or resume a schedule without deleting it.
+     */
+    fun setScheduledRunEnabled(runId: Long, enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val run = db.scheduledRunDao().get(runId) ?: return@launch
+            db.scheduledRunDao().update(run.copy(enabled = enabled))
+            reArmSchedules()
+        }
+    }
+
+    /**
+     * Delete a schedule and cancel its pending alarms.
+     */
+    fun deleteScheduledRun(runId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val run = db.scheduledRunDao().get(runId)
+            if (run != null) com.tickedge.domain.TradeScheduler.cancel(getApplication(), run)
+            db.scheduledRunDao().delete(runId)
+        }
+    }
+
+    /**
+     * Ask the OS to exempt this app from battery optimisation, so an overnight schedule survives
+     * Doze. The foreground service is the default protection; this is the stronger one the user
+     * opted into. Returns whether the system showed the exemption screen.
+     */
+    fun requestBatteryExemption(activity: Activity): Boolean {
+        val app: Application = getApplication()
+        val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(app.packageName)) return false
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            setData(Uri.parse("package:${app.packageName}"))
+        }
+        activity.startActivity(intent)
+        return true
+    }
+
+    /** Whether the OS currently keeps this app out of Doze. */
+    fun isBatteryOptimizationsDisabled(): Boolean {
+        val app: Application = getApplication()
+        return (app.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .isIgnoringBatteryOptimizations(app.packageName)
+    }
+
+    /** Re-arm every schedule for the current user. */
+    private fun reArmSchedules() {
+        viewModelScope.launch(Dispatchers.IO) {
+            com.tickedge.domain.TradeScheduler.armAll(getApplication(), currentUserId)
+        }
+    }
+
     /**
      * Arm or disarm live trading — **and** move the active account with it.
      *
@@ -2135,9 +2257,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * The Stop button on the Trade page stops the strategy the user is looking at, because that is
      * the one they can see. This is the other thing: everything, at once.
+     *
+     * It also broadcasts the stop to every other signed-in device, on the shared cloud channel — a
+     * "stop the bot" press is about the account, not one phone, so the stop reaches the sibling
+     * that is also trading that account. The local engine stops immediately; the broadcast is what
+     * the other device's watch loop picks up.
      */
     fun stopAllTrading() {
         runtime.stopAllEngines()
+        runtime.broadcastStop()
     }
 
     /**
@@ -2172,40 +2300,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Analysis events carry no account column (they are per-market observations), so they are
      * cleared for the user as a whole and the confirmation dialog says so.
      */
-    fun clearHistory() {
-        val accountId = deriv.activeAccount?.id.orEmpty()
-        viewModelScope.launch(Dispatchers.IO) {
-            var removed = emptyList<SimulationPositionEntity>()
-            if (accountId.isBlank()) {
-                // No account resolved: refuse rather than falling back to a user-wide delete,
-                // which would remove more than the user was told would be removed.
-                android.util.Log.w("MainViewModel", "clearHistory ignored: no active account id")
-            } else {
-                // Collected before the delete so the same rows can be removed from the cloud too.
-                // Leaving them there would let the next sync restore exactly what was just cleared.
-                removed = db.simulationDao()
-                    .getPositionsForUserAndAccount(currentUserId, accountId)
-                db.simulationDao().clearPositionsForUserAndAccount(currentUserId, accountId)
-            }
-            db.analysisEventDao().clearEventsForUser(currentUserId)
-            tradingEngine.resetDailyLoss()
-            deleteTradesFromCloud(removed)
-        }
+    /**
+     * The user's "start counting from zero again" from the settings page.
+     *
+     * Zeros every engine's loss/risk accumulators — the streak, the net daily loss, the session
+     * profit, the recovery ladder — on every strategy, and does not touch a single trade row,
+     * analysis event or cloud record. The history behind the counters stays whole; only the
+     * running figures clear.
+     *
+     * The destructive wipe this used to be is gone: deleting the account's trade rows was the bug,
+     * not the intent. A reset that erases the record makes the stop-loss and daily-limit figures
+     * unreadable afterwards — there is nothing left to read them against.
+     */
+    fun resetStats() {
+        runtime.resetRiskStatsAll()
     }
 
     /**
-     * Remove cleared trades from the cloud.
+     * Wipe the entire trade + session + analysis record for **every** user on this device.
      *
-     * Without this, clearing history is cosmetic: the rows are gone locally but the next pull
-     * brings them straight back. Best-effort — a failure here leaves stale rows in the cloud, which
-     * is recoverable, whereas blocking the local clear would leave the user unable to clear at all.
+     * This is the one-time "start the new system from a clean record" reset, not the stats-only
+     * [resetStats] above: it deletes the data itself, positions and sessions for all users, plus
+     * every analysis event. The FIDScript cloud copy is wiped separately (it is a per-user
+     * namespace the device cannot enumerate beyond its own rows, so the global cloud clear is an
+     * admin step, not app code).
+     *
+     * Identities, settings and the cloud session survive — only the record goes. Deliberately a
+     * distinct function from [resetStats] so the settings page's two actions cannot be confused:
+     * one zeros the counters, the other deletes the data.
      */
-    private suspend fun deleteTradesFromCloud(positions: List<SimulationPositionEntity>) {
-        if (!fidscript.isReady() || positions.isEmpty()) return
-        positions.forEach { position ->
-            if (position.contractId.isNotBlank()) {
-                fidscript.deleteEntity(InstantDbClient.tradeEntityId(position.contractId))
-            }
+    fun resetAllHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.simulationDao().clearAllPositions()
+            db.simulationDao().clearAllSessions()
+            db.analysisEventDao().clearAllEvents()
+            // Clear the signed-in user's cloud copy too, or the next pull would re-import the very
+            // record just wiped. Only when a cloud session exists — a local-only wipe is still
+            // useful when not signed in, and there is nothing in the cloud to clear.
+            fidscript.deleteAllIn(FidscriptAttrs.NS_TRADE_HISTORY)
         }
     }
 

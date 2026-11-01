@@ -4,12 +4,15 @@ import android.app.Application
 import com.tickedge.BuildConfig
 import com.tickedge.auth.DerivOAuthClient
 import com.tickedge.data.deriv.DerivClient
+import com.tickedge.data.instant.FidscriptSession
+import com.tickedge.data.instant.InstantDbClient
 import com.tickedge.data.local.AppDatabase
 import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.websocket.DerivWebSocketService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -83,6 +86,195 @@ class TradingRuntime private constructor(
     /** Posts the alerts — the moments a run ends because a limit was reached. */
     private val notifier = TradingNotifier(application)
 
+    /** The FIDScript client, lazily — it needs the cloud session, which may not exist yet. */
+    private val fidscriptSession = FidscriptSession(application)
+    private val cloudClient = InstantDbClient(
+        appId = BuildConfig.INSTANT_APP_ID,
+        apiBase = BuildConfig.INSTANT_API_BASE,
+        session = fidscriptSession
+    )
+
+    /**
+     * The last `stopRequestedAt` this device already acted on. A stop older than the last one seen
+     * is not re-fired: two devices must not keep stopping each other in a loop over a stale flag.
+     */
+    @Volatile
+    private var lastSeenStopAt: Long = 0L
+
+    /**
+     * Whether the two cloud loops are already running. They are started lazily on cloud sign-in,
+     * which can happen more than once for a session (a re-verify), so each is guarded against a
+     * second, competing loop rather than started every time.
+     */
+    @Volatile
+    private var cloudStopWatchStarted = false
+    @Volatile
+    private var sessionProgressMirrorStarted = false
+
+    // ---------------------------------------------------------- cloud session mirror
+
+    /**
+     * Publish an open session to the cloud so a sibling device sees it go live.
+     *
+     * No-op when there is no cloud session — the whole mirror is optional, and a device that is not
+     * signed in to the cloud still trades normally; it just does not share its record.
+     */
+    fun mirrorSessionOpen(session: SimulationSessionEntity) {
+        if (!cloudClient.isReady()) return
+        val fidUserId = fidscriptSession.userId() ?: return
+        val id = session.id
+        scope.launch(Dispatchers.IO) {
+            cloudClient.upsertSession(
+                userId = fidUserId,
+                entityId = InstantDbClient.sessionEntityId(id),
+                fields = mapOf(
+                    "userId" to fidUserId,
+                    "sessionId" to id,
+                    "strategyId" to session.strategyId,
+                    "strategy" to session.strategy,
+                    "isReal" to session.isReal,
+                    "accountId" to session.accountId,
+                    "status" to session.status,
+                    "startedAt" to session.startedAt,
+                    "initialSimulatedBalance" to session.initialSimulatedBalance,
+                    "currentSimulatedBalance" to session.currentSimulatedBalance,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    /**
+     * Re-write a running session's live totals so a sibling sees the P&L moving, not just "open".
+     */
+    suspend fun mirrorSessionProgress(strategyId: String) {
+        if (!cloudClient.isReady()) return
+        val session = openSessions[strategyId] ?: return
+        val fidUserId = fidscriptSession.userId() ?: return
+        val summary = db.simulationDao().getSessionSummary(session.userId, session.id).first()
+        cloudClient.upsertSession(
+            userId = fidUserId,
+            entityId = InstantDbClient.sessionEntityId(session.id),
+            fields = mapOf(
+                "userId" to fidUserId,
+                "sessionId" to session.id,
+                "status" to "ACTIVE",
+                "totalTrades" to summary.completedTrades,
+                "winCount" to summary.winCount,
+                "lossCount" to summary.lossCount,
+                "netProfit" to summary.totalRealizedPnl,
+                "grossProfit" to summary.grossProfit,
+                "grossLoss" to summary.grossLoss,
+                "totalStaked" to summary.totalStaked,
+                "updatedAt" to System.currentTimeMillis()
+            )
+        )
+    }
+
+    /** Publish a session's COMPLETED row, so a sibling sees it finished with its final figures. */
+    suspend fun mirrorSessionClosed(strategyId: String, session: SimulationSessionEntity) {
+        if (!cloudClient.isReady()) return
+        val fidUserId = fidscriptSession.userId() ?: return
+        val summary = db.simulationDao().getSessionSummary(session.userId, session.id).first()
+        cloudClient.upsertSession(
+            userId = fidUserId,
+            entityId = InstantDbClient.sessionEntityId(session.id),
+            fields = mapOf(
+                "userId" to fidUserId,
+                "sessionId" to session.id,
+                "status" to "COMPLETED",
+                "endedAt" to System.currentTimeMillis(),
+                "totalTrades" to summary.completedTrades,
+                "winCount" to summary.winCount,
+                "lossCount" to summary.lossCount,
+                "netProfit" to summary.totalRealizedPnl,
+                "grossProfit" to summary.grossProfit,
+                "grossLoss" to summary.grossLoss,
+                "totalStaked" to summary.totalStaked,
+                "updatedAt" to System.currentTimeMillis()
+            )
+        )
+    }
+
+    /**
+     * Keep a running session's live totals in the cloud so a sibling sees the P&L move.
+     *
+     * Mirrors every open session's SQL totals every [CLOUD_PROGRESS_POLL_MS], no-op when nothing is
+     * open or there is no cloud session. This is what makes "the same session on two phones" a
+     * moving figure on both rather than an open-with-nothing on the remote one.
+     */
+    fun startSessionProgressMirror() {
+        if (sessionProgressMirrorStarted) return
+        sessionProgressMirrorStarted = true
+        scope.launch {
+            while (true) {
+                if (cloudClient.isReady() && fidscriptSession.userId() != null) {
+                    sessionIds.keys.toList().forEach { strategyId ->
+                        mirrorSessionProgress(strategyId)
+                    }
+                }
+                delay(CLOUD_PROGRESS_POLL_MS)
+            }
+        }
+    }
+
+    /**
+     * Tell every other signed-in device to stop trading, on the shared run-control channel.
+     *
+     * The stop is written to the cloud; each device's watch loop is what acts on it locally. This
+     * is the "stop on one phone, stop on the other" — a device that only stops its own engine would
+     * leave the sibling trading.
+     */
+    fun broadcastStop() {
+        val fidUserId = fidscriptSession.userId() ?: return
+        if (!cloudClient.isReady()) return
+        scope.launch(Dispatchers.IO) {
+            cloudClient.requestRunStop(fidUserId)
+            // A stop we just asked for is one we have already seen; don't let our own watch re-fire.
+            lastSeenStopAt = System.currentTimeMillis()
+        }
+    }
+
+    /**
+     * Watch the shared stop channel.
+     *
+     * Every [CLOUD_STOP_POLL_MS] the watch reads this user's `run_control` row and, when a
+     * `stopRequested` is newer than the one already acted on, stops every engine on this device and
+     * clears the flag so the next stop is the one that fires. Polling rather than a push subscription
+     * keeps it on the same REST transport everything else already uses, and a ~5 s period is fast
+     * enough that "stop on the other phone" lands within one poll, not minutes.
+     *
+     * Started lazily (not in `get()`) so a device with no cloud session pays nothing. Guarded so a
+     * sign-in that fires the start twice (a re-verify on the same session) does not open a second,
+     * competing watch.
+     */
+    fun startCloudStopWatch() {
+        if (cloudStopWatchStarted) return
+        cloudStopWatchStarted = true
+        scope.launch {
+            while (true) {
+                val fidUserId = fidscriptSession.userId()
+                if (fidUserId != null && cloudClient.isReady()) {
+                    cloudClient.readNamespace(com.tickedge.data.instant.FidscriptAttrs.NS_RUN_CONTROL)
+                        .onSuccess { rows ->
+                            val row = rows[InstantDbClient.controlEntityId(fidUserId)]
+                            if (row != null) {
+                                val requested = (row["stopRequested"] as? Boolean) == true
+                                val at = (row["stopRequestedAt"] as? Number)?.toLong() ?: 0L
+                                if (requested && at > lastSeenStopAt) {
+                                    lastSeenStopAt = at
+                                    stopAllEngines()
+                                    cloudClient.clearRunStop(fidUserId)
+                                }
+                            }
+                        }
+                }
+                delay(CLOUD_STOP_POLL_MS)
+            }
+        }
+    }
+
+
     /**
      * The engine for a strategy, created the first time it is asked for.
      *
@@ -137,8 +329,11 @@ class TradingRuntime private constructor(
 
     /** Opens a session for a strategy's run and publishes it. */
     fun openSession(strategyId: String, session: SimulationSessionEntity, openedId: Long) {
+        val stored = session.copy(id = openedId)
         sessionIds[strategyId] = openedId
-        openSessions[strategyId] = session.copy(id = openedId)
+        openSessions[strategyId] = stored
+        // Publish it so a sibling device sees the run go live — the record is shared, not per-phone.
+        mirrorSessionOpen(stored)
     }
 
     /**
@@ -158,6 +353,9 @@ class TradingRuntime private constructor(
         }
 
         writeSessionTotals(session)
+
+        // The session just closed — publish its COMPLETED row so a sibling sees it finished.
+        mirrorSessionClosed(strategyId, session)
 
         // The session row stays in the database — that is the history. Only the runtime's
         // reference to it is dropped.
@@ -257,6 +455,17 @@ class TradingRuntime private constructor(
     }
 
     /**
+     * Zero the risk counters on every strategy at once.
+     *
+     * Both strategies can be running side by side, and the user's reset is about the account's
+     * counters, not about one strategy's, so every engine that exists is reset — a strategy that
+     * has never run gets nothing created on its behalf.
+     */
+    fun resetRiskStatsAll() {
+        engines.values.forEach { engine -> engine.resetRiskStats() }
+    }
+
+    /**
      * Stops the foreground service, but only once nothing is trading.
      *
      * With one strategy this is the whole story. With two, a strategy that stops while the other
@@ -285,6 +494,14 @@ class TradingRuntime private constructor(
          * looked busy.
          */
         private const val SERVICE_STOP_GRACE_MS = 750L
+
+        /** How often the shared-stop watch polls the cloud. Fast enough that a stop on the other
+         *  phone lands within one tick; quiet enough that a signed-in-but-idle device costs little. */
+        private const val CLOUD_STOP_POLL_MS = 5_000L
+
+        /** How often a running session's live totals are re-published to the cloud. Same cadence as
+         *  the stop watch — a sibling should see P&L move within seconds, not settle-and-lag. */
+        private const val CLOUD_PROGRESS_POLL_MS = 5_000L
 
         @Volatile
         private var INSTANCE: TradingRuntime? = null

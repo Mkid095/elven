@@ -78,6 +78,10 @@ class TradingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        when (intent?.getStringExtra(EXTRA_SCHEDULE_ACTION)) {
+            TradeScheduler.ACTION_START -> handleScheduledStart(intent)
+            TradeScheduler.ACTION_STOP -> handleScheduledStop(intent)
+        }
         if (intent?.action == ACTION_STOP) {
             stopTrading()
             return START_NOT_STICKY
@@ -86,6 +90,37 @@ class TradingService : Service() {
         // restarted and the trading loop — which lives in the runtime, not in this process's
         // memory — picks up from where it was.
         return START_STICKY
+    }
+
+    /**
+     * An alarm fired to start a scheduled run. This service is the thing that stays alive to
+     * trade, so the headless start happens here: no Activity, no ViewModel, just the runtime and
+     * the on-disk token and settings.
+     */
+    private fun handleScheduledStart(intent: Intent) {
+        val strategyId = intent.getStringExtra(EXTRA_STRATEGY_ID) ?: return
+        val accountKind = intent.getStringExtra(EXTRA_ACCOUNT_KIND)?.let {
+            runCatching { com.tickedge.data.deriv.DerivAccountKind.valueOf(it) }.getOrNull()
+        } ?: com.tickedge.data.deriv.DerivAccountKind.DEMO
+        serviceScope.launch {
+            val result = HeadlessTrader.start(this@TradingService, strategyId, accountKind)
+            android.util.Log.i("TradingService", "Scheduled start ($strategyId): $result")
+            // A schedule that cannot trade must say so, not fail quietly. The token expiring is the
+            // one case that outlives the device without a person, so it is the one worth a line
+            // the user can find in the log. (A dedicated notification is a follow-up.)
+            if (result is HeadlessTrader.StartResult.TokenExpired) {
+                android.util.Log.w("TradingService", "Scheduled start skipped: Deriv access token expired and cannot be refreshed")
+            }
+        }
+    }
+
+    /** An alarm fired to stop a scheduled window. */
+    private fun handleScheduledStop(intent: Intent) {
+        val strategyId = intent.getStringExtra(EXTRA_STRATEGY_ID) ?: return
+        serviceScope.launch {
+            HeadlessTrader.stop(this@TradingService, strategyId)
+            android.util.Log.i("TradingService", "Scheduled stop: $strategyId")
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -129,6 +164,14 @@ class TradingService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.tickedge.action.STOP_TRADING"
+
+        // Extras the schedule alarm carries so the service knows which run it is starting or
+        // stopping. Distinct from ACTION_STOP (the notification's stop) because that one stops
+        // *every* engine, whereas a scheduled stop targets the one strategy in its window.
+        const val EXTRA_SCHEDULE_ACTION = "schedule_action"
+        const val EXTRA_SCHEDULE_ID = "schedule_id"
+        const val EXTRA_STRATEGY_ID = "strategy_id"
+        const val EXTRA_ACCOUNT_KIND = "account_kind"
 
         /**
          * Starts the service, so the process is kept alive while the bot trades.

@@ -223,14 +223,18 @@ fun TickEdgeApp(
         navItems.firstOrNull { it.route == item.route }?.copy(title = item.label)
     }
 
+    // The lifetime figures come from SQL over the whole record, and the trade count from a
+    // COUNT query — not from the positions list, which is a slice. That is what lets "all time"
+    // keep counting past whatever the list holds.
+    val lifetime by viewModel.lifetimeStats.collectAsStateWithLifecycle()
+    val tradeCount by viewModel.tradeCount.collectAsStateWithLifecycle()
+
     // Calculate PnL & Win Rate from real settled records (no fabricated defaults)
     val dayAgo = System.currentTimeMillis() - 86_400_000L
-    val allTimePnl = pastPositions.sumOf { it.simulatedNetResult }
+    val allTimePnl = lifetime.netPnl
     val todayPnl = pastPositions.filter { it.settledAt >= dayAgo }.sumOf { it.simulatedNetResult }
-    val settledCount = pastPositions.count { it.outcome == "WON" || it.outcome == "LOST" }
-    val winCount = pastPositions.count { it.outcome == "WON" }
-    val winRate = if (settledCount > 0) winCount * 100 / settledCount else 0
-    val totalTrades = pastPositions.size
+    val winRate = if (lifetime.settledTrades > 0) lifetime.winCount * 100 / lifetime.settledTrades else 0
+    val totalTrades = tradeCount
 
     // Hide bottom navigation when in full-page trade settings, and on the strategy list — which is
     // a page above the app rather than a page within it, so it carries no menu of its own.
@@ -404,7 +408,19 @@ fun TickEdgeApp(
                     syncState = syncState,
                     // The account's lifetime record — total profit, total loss, net — since first use.
                     lifetimeStats = viewModel.lifetimeStats.collectAsStateWithLifecycle().value,
-                    onClearHistoryClick = { viewModel.clearHistory() },
+                    onResetStatsClick = { viewModel.resetStats() },
+                    onResetHistoryClick = { viewModel.resetAllHistory() },
+                    canResetHistory = cloudSignedIn,
+                    scheduledRuns = viewModel.scheduledRuns.collectAsStateWithLifecycle().value,
+                    onAddSchedule = viewModel::saveScheduledRun,
+                    onToggleSchedule = viewModel::setScheduledRunEnabled,
+                    onDeleteSchedule = viewModel::deleteScheduledRun,
+                    batteryExempt = viewModel.isBatteryOptimizationsDisabled(),
+                    onRequestBatteryExemption = {
+                        // The exemption screen is a system activity; it has to be launched from a real
+                        // Activity, which is the one hosting this composition, not the composition scope.
+                        activity?.let { viewModel.requestBatteryExemption(it) }
+                    },
                     onSignOutClick = { viewModel.derivLogout() },
                     onSaveProfileName = viewModel::saveProfileDisplayName,
                     cloudSignedIn = cloudSignedIn,

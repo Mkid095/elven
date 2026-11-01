@@ -89,6 +89,30 @@ interface StrategySettingsDao {
 }
 
 @Dao
+interface ScheduledRunDao {
+    /** Every enabled schedule for a user, so the scheduler can re-arm them. */
+    @Query("SELECT * FROM scheduled_runs WHERE userId = :userId AND enabled = 1 ORDER BY startAt ASC")
+    suspend fun getEnabledForUser(userId: String): List<ScheduledRunEntity>
+
+    /** All of a user's schedules (enabled or not), for the schedule list in settings. */
+    @Query("SELECT * FROM scheduled_runs WHERE userId = :userId ORDER BY startAt ASC")
+    fun getForUser(userId: String): Flow<List<ScheduledRunEntity>>
+
+    /** One schedule by id. */
+    @Query("SELECT * FROM scheduled_runs WHERE id = :id LIMIT 1")
+    suspend fun get(id: Long): ScheduledRunEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(run: ScheduledRunEntity): Long
+
+    @Update
+    suspend fun update(run: ScheduledRunEntity)
+
+    @Query("DELETE FROM scheduled_runs WHERE id = :id")
+    suspend fun delete(id: Long)
+}
+
+@Dao
 interface AnalysisEventDao {
     /**
      * All analysis events for a user, newest first.
@@ -105,11 +129,13 @@ interface AnalysisEventDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEvent(event: AnalysisEventEntity): Long
 
-    /** Delete all events for a user. */
-    @Query("DELETE FROM analysis_events WHERE userId = :userId")
-    suspend fun clearEventsForUser(userId: String)
-
-    /** Delete all events regardless of user. */
+    /**
+     * Delete every analysis event regardless of user.
+     *
+     * Part of the one-time "start the new system from a clean record" wipe: analysis events are
+     * per-market observations that feed no session total, so when the trade + session history is
+     * cleared for everyone, these go with it rather than leaving a half-record.
+     */
     @Query("DELETE FROM analysis_events")
     suspend fun clearAllEvents()
 }
@@ -117,19 +143,72 @@ interface AnalysisEventDao {
 @Dao
 interface SimulationDao {
     /**
-     * All settled positions for a user, newest first.
-     * @param userId Stable user identity
-     * @param limit Maximum positions to return (default 200)
+     * All settled positions for a user, newest first — **uncapped**.
+     *
+     * The limit was removed because a hard cap on the number of trade rows is a data-loss bug:
+     * the moment a user crossed it the History screen appeared to "stop recording", and every
+     * total computed on that list (Home's trade count, the lifetime P&L) was silently truncated to
+     * the newest N. All records must be shown, so the list is complete and the LazyColumn that
+     * renders it pages through the rest. The SQL aggregate queries below ([getLifetimeStats],
+     * [observeTradeCount]) are what make a complete list affordable — the figures it feeds are
+     * never recomputed from a truncated slice.
      */
-    @Query("SELECT * FROM simulation_positions WHERE userId = :userId ORDER BY settledAt DESC LIMIT :limit")
-    fun getPositionsForUser(userId: String, limit: Int = 200): Flow<List<SimulationPositionEntity>>
+    @Query("SELECT * FROM simulation_positions WHERE userId = :userId ORDER BY settledAt DESC")
+    fun getPositionsForUser(userId: String): Flow<List<SimulationPositionEntity>>
 
-    /** Every position on one account, so a clear can also remove them from the cloud. */
-    @Query("SELECT * FROM simulation_positions WHERE userId = :userId AND accountId = :accountId")
-    suspend fun getPositionsForUserAndAccount(
-        userId: String,
-        accountId: String
-    ): List<SimulationPositionEntity>
+    /**
+     * Lifetime figures over **every** settled trade.
+     *
+     * This is what "since you started using TickEdge" must be: a SQL aggregate, so it counts
+     * the entire record instead of whatever slice the list queries happen to hold. PENDING
+     * rows contribute nothing — neither win nor loss is final until Deriv settles it.
+     */
+    @Query(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN outcome = 'WON' AND simulatedNetResult > 0 THEN simulatedNetResult ELSE 0 END), 0.0)
+                AS totalProfit,
+            COALESCE(SUM(CASE WHEN outcome = 'LOST' THEN -simulatedNetResult ELSE 0 END), 0.0)
+                AS totalLoss,
+            COALESCE(SUM(CASE WHEN outcome IN ('WON','LOST') THEN simulatedNetResult ELSE 0 END), 0.0)
+                AS netPnl,
+            COALESCE(SUM(CASE WHEN outcome IN ('WON','LOST') THEN 1 ELSE 0 END), 0)
+                AS settledTrades,
+            COALESCE(SUM(CASE WHEN outcome = 'WON' THEN 1 ELSE 0 END), 0)
+                AS winCount
+        FROM simulation_positions
+        WHERE userId = :userId
+        """
+    )
+    fun getLifetimeStats(userId: String): Flow<LifetimeStatsRow>
+
+    /**
+     * How many trades the user has, ever.
+     *
+     * The Home "trades" figure. It is a COUNT rather than the positions list's `size`, because
+     * a COUNT is cheap, exact and updates the instant a trade settles — the list itself is the
+     * full record, but the count does not have to be derived by walking it.
+     */
+    @Query("SELECT COUNT(*) FROM simulation_positions WHERE userId = :userId")
+    fun observeTradeCount(userId: String): Flow<Int>
+
+    /**
+     * How many settled trades still need to reach the cloud, ready to upload.
+     *
+     * This is the outbox's counter, and it is what should trigger the drain — not a re-emit of
+     * the whole positions list, which used to set off up to fifty sequential uploads on every
+     * single new row. Room re-runs this COUNT only when the set of unsynced rows actually
+     * changes (an insert, or `markSynced`), so it goes back to zero after a drain and stays
+     * quiet.
+     *
+     * Blank-`contractId` rows are excluded: the drain skips them (they have no stable cloud
+     * key), so counting them would leave the counter at a number it can never reach.
+     */
+    @Query(
+        "SELECT COUNT(*) FROM simulation_positions " +
+            "WHERE userId = :userId AND syncedToCloud = 0 AND contractId != ''"
+    )
+    fun countUnsyncedUploadable(userId: String): Flow<Int>
 
     /** All positions regardless of user (for admin/debug). */
     @Query("SELECT * FROM simulation_positions ORDER BY settledAt DESC LIMIT 200")
@@ -193,9 +272,9 @@ interface SimulationDao {
     @Query("SELECT * FROM simulation_sessions WHERE userId = :userId AND isReal = :isReal ORDER BY startedAt DESC")
     fun getSessionsForAccount(userId: String, isReal: Boolean): Flow<List<SimulationSessionEntity>>
 
-    /** Trades for one account only, newest first. */
-    @Query("SELECT * FROM simulation_positions WHERE userId = :userId AND isReal = :isReal ORDER BY settledAt DESC LIMIT :limit")
-    fun getPositionsForAccount(userId: String, isReal: Boolean, limit: Int = 200): Flow<List<SimulationPositionEntity>>
+    /** Trades for one account only, newest first — uncapped, matching [getPositionsForUser]. */
+    @Query("SELECT * FROM simulation_positions WHERE userId = :userId AND isReal = :isReal ORDER BY settledAt DESC")
+    fun getPositionsForAccount(userId: String, isReal: Boolean): Flow<List<SimulationPositionEntity>>
 
     /** The newest session on one account, whether or not it was ever closed. */
     @Query("SELECT * FROM simulation_sessions WHERE userId = :userId AND isReal = :isReal ORDER BY startedAt DESC LIMIT 1")
@@ -308,6 +387,10 @@ interface SimulationDao {
     @Query("DELETE FROM simulation_sessions WHERE userId = :userId")
     suspend fun clearSessionsForUser(userId: String)
 
+    /** Delete every session regardless of user — the global "start fresh" wipe. */
+    @Query("DELETE FROM simulation_sessions")
+    suspend fun clearAllSessions()
+
     /** How many trades a user has, for deciding whether stranded rows can safely be reclaimed. */
     @Query("SELECT COUNT(*) FROM simulation_positions WHERE userId = :userId")
     suspend fun countPositionsForUser(userId: String): Int
@@ -342,4 +425,19 @@ data class LastTradeRow(
     val settledAt: Long,
     val marketName: String,
     val outcome: String
+)
+
+/**
+ * Flat row backing [SimulationDao.getLifetimeStats].
+ *
+ * The SQL computes it, and the ViewModel maps it to its own `LifetimeStats`. Keeping this
+ * row in the data layer (next to [SessionSummary]) rather than hand-rolling the sums in Kotlin
+ * is what lets the figure grow past the newest-1000 cap of the list queries.
+ */
+data class LifetimeStatsRow(
+    val totalProfit: Double = 0.0,
+    val totalLoss: Double = 0.0,
+    val netPnl: Double = 0.0,
+    val settledTrades: Int = 0,
+    val winCount: Int = 0
 )

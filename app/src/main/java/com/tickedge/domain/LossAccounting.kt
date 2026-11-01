@@ -14,8 +14,10 @@ package com.tickedge.domain
  *  - **How deep is this run in the hole right now?** The stop loss. Measured on the losing streak
  *    in progress. A win ends the streak, so a recovered loss is a recovered loss and the measure
  *    starts again.
- *  - **How much has this account lost today?** The daily limit. Measured on everything lost since
- *    midnight. A win does not undo it — the money was lost, even if it was earned back later.
+ *  - **How much is this account net down today?** The daily limit. A *net* figure: a win that
+ *    recovers the day's losses brings it back toward zero, because that is what the recovery
+ *    ladder exists for. What stays lost stands against the limit; the budget still restarts at
+ *    midnight.
  *
  * Kept as its own class rather than as two fields on the trading engine so the rules can be tested
  * without a socket, a database and a coroutine.
@@ -26,7 +28,11 @@ class LossAccounting {
     var streakLoss: Double = 0.0
         private set
 
-    /** Everything lost since the day rolled over. Never reduced by a win. */
+    /**
+     * The account's net position against the day's budget: everything lost since midnight minus
+     * what wins recovered. A recovery win that closes the hole brings this back toward zero, which
+     * is the point of the ladder; a loss that stays lost stands against the limit.
+     */
     var dailyLoss: Double = 0.0
         private set
 
@@ -46,12 +52,17 @@ class LossAccounting {
     /**
      * Books a win.
      *
-     * The streak ends, so the stop loss starts again from zero. The day's total is untouched: the
-     * loss that prompted the recovery was real money and the daily limit is a budget, not a
-     * running scoreboard.
+     * The streak ends, so the stop loss starts again from zero. The daily figure drops by the
+     * win's net profit — a loss the win recovered stops counting against the budget. That is what
+     * the old behaviour got wrong: the limit would stay tripped on money the account had already
+     * won back, so the recovery ladder existed only to trip the very limit it was recovering from.
+     *
+     * Floored at zero: a win bigger than the day's net loss means the day is in profit, and a
+     * negative "loss" would read as the account gaining budget it was never given.
      */
-    fun recordWin() {
+    fun recordWin(winAmount: Double) {
         streakLoss = 0.0
+        if (winAmount > 0.0) dailyLoss = (dailyLoss - winAmount).coerceAtLeast(0.0)
     }
 
     /**
@@ -67,6 +78,12 @@ class LossAccounting {
 
     /** Midnight passed. The day's budget starts again; the streak is untouched. */
     fun rolloverDay() {
+        dailyLoss = 0.0
+    }
+
+    /** Both measures to zero — an explicit "start fresh", distinct from a run boundary. */
+    fun resetAll() {
+        streakLoss = 0.0
         dailyLoss = 0.0
     }
 

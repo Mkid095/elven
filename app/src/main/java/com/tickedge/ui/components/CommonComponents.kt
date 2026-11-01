@@ -32,8 +32,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
@@ -517,7 +517,14 @@ fun SimpleLineChart(
     modifier: Modifier = Modifier,
     lineColor: Color = VividYellow
 ) {
-    if (points.isEmpty()) return
+    // Fewer than two points draws nothing; a single point has no line to connect.
+    if (points.size < 2) return
+
+    // Downsample to at most CHART_MAX_POINTS points before the Canvas ever sees the list: a
+    // full-Record P&L series is thousands of points, and a drawLine per segment is the cost
+    // that froze the History page. One pass over the whole list picks which points to keep,
+    // and min/max come out of the same pass.
+    val sampled = downsampleForChart(points, CHART_MAX_POINTS)
 
     Box(
         modifier = modifier
@@ -528,24 +535,61 @@ fun SimpleLineChart(
             .padding(8.dp)
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
-            val min = points.minOrNull() ?: 0.0
-            val max = points.maxOrNull() ?: 1.0
+            val min = sampled.min
+            val max = sampled.max
             val range = if (max - min == 0.0) 1.0 else max - min
+            val values = sampled.values
 
-            val spacing = size.width / (points.size - 1).coerceAtLeast(1)
-
-            for (i in 0 until points.size - 1) {
-                val y1 = size.height - (((points[i] - min) / range) * size.height).toFloat()
-                val y2 = size.height - (((points[i + 1] - min) / range) * size.height).toFloat()
-
-                drawLine(
-                    color = lineColor,
-                    start = Offset(i * spacing, y1),
-                    end = Offset((i + 1) * spacing, y2),
-                    strokeWidth = 3.dp.toPx(),
-                    cap = StrokeCap.Round
-                )
+            // One Path, one draw. The per-segment drawLine loop is what made the chart O(n)
+            // Canvas calls on every recomposition; a single stroke is one.
+            val path = Path()
+            val spacing = size.width / (values.size - 1)
+            path.moveTo(0f, size.height - (((values[0] - min) / range) * size.height).toFloat())
+            for (i in 1 until values.size) {
+                val y = size.height - (((values[i] - min) / range) * size.height).toFloat()
+                path.lineTo(i * spacing, y)
             }
+            drawPath(
+                path = path,
+                color = lineColor,
+                style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+            )
         }
     }
+}
+
+/** How many points the P&L chart ever draws. */
+private const val CHART_MAX_POINTS = 300
+
+/**
+ * The points a chart actually draws, with their range, when [values] is too long to draw as-is.
+ *
+ * The full list's min and max are kept even when the interior is thinned out, so the envelope
+ * of the line is unchanged by the thinning — a chart of every third point, not of a different
+ * set of points.
+ */
+private class SampledChart(
+    val values: List<Double>,
+    val min: Double,
+    val max: Double
+)
+
+private fun downsampleForChart(points: List<Double>, target: Int): SampledChart {
+    var min = Double.MAX_VALUE
+    var max = Double.MIN_VALUE
+    for (v in points) {
+        if (v < min) min = v
+        if (v > max) max = v
+    }
+
+    if (points.size <= target) return SampledChart(points, min, max)
+
+    // A fixed stride keeps the sample even: every stride-th point, first and last included so
+    // the line's ends are never clipped off by the thinning.
+    val stride = points.size.toFloat() / target
+    val sampled = ArrayList<Double>(target)
+    for (i in 0 until target) {
+        sampled.add(points[(i * stride).toInt().coerceAtMost(points.size - 1)])
+    }
+    return SampledChart(sampled, min, max)
 }

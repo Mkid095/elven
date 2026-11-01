@@ -77,7 +77,19 @@ fun SettingsScreen(
     syncState: SyncState,
     /** The account's lifetime record, shown under the profile card. */
     lifetimeStats: LifetimeStats = LifetimeStats(),
-    onClearHistoryClick: () -> Unit,
+    onResetStatsClick: () -> Unit,
+    /** Wipes the whole trade + session + analysis record (the destructive reset). */
+    onResetHistoryClick: () -> Unit = {},
+    /** Whether the destructive history wipe should be allowed (cloud signed in, so it clears cleanly). */
+    canResetHistory: Boolean = true,
+    /** This user's saved schedules, shown in the "Auto trading" card. */
+    scheduledRuns: List<com.tickedge.data.local.ScheduledRunEntity> = emptyList(),
+    onAddSchedule: (com.tickedge.data.local.ScheduledRunEntity) -> Unit = {},
+    onToggleSchedule: (Long, Boolean) -> Unit = { _, _ -> },
+    onDeleteSchedule: (Long) -> Unit = {},
+    /** Whether the OS currently keeps the app out of battery optimisation. */
+    batteryExempt: Boolean = false,
+    onRequestBatteryExemption: () -> Unit = {},
     onSignOutClick: () -> Unit = {},
     /** Saves the trader's display name. */
     onSaveProfileName: (String) -> Unit = {},
@@ -90,6 +102,7 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
+    var showResetHistoryDialog by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
     // The name editor. Open on demand rather than always, because a permanent text field on the
     // settings page invites accidental edits.
@@ -339,10 +352,18 @@ fun SettingsScreen(
                     SettingsDivider()
                     SettingsRowItem(
                         icon = Icons.Default.Delete,
-                        title = "Reset Trade & Analysis History",
-                        subtitle = "Clear local Room database records",
+                        title = "Reset stats",
+                        subtitle = "Zero the stop-loss, daily-limit & session counters — history kept",
                         iconTint = StatRed,
                         onClick = { showResetDialog = true }
+                    )
+                    SettingsDivider()
+                    SettingsRowItem(
+                        icon = Icons.Default.Delete,
+                        title = "Reset trade history",
+                        subtitle = "Delete every trade, session & analysis record for everyone",
+                        iconTint = StatRed,
+                        onClick = { showResetHistoryDialog = true }
                     )
                     SettingsDivider()
                     SettingsRowItem(
@@ -352,6 +373,119 @@ fun SettingsScreen(
                         iconTint = VividYellow,
                         onClick = onSignOutClick
                     )
+                }
+            }
+        }
+
+        // Auto trading: schedules the phone fires by itself, no person at the device.
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(text = "Auto trading", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = VividYellow)
+                            Text(
+                                text = "Schedules that start and stop a strategy on the phone, unattended",
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                        }
+                        TextButton(onClick = {
+                            val app = java.util.Calendar.getInstance()
+                            app.add(java.util.Calendar.MINUTE, 10)
+                            onAddSchedule(
+                                com.tickedge.data.local.ScheduledRunEntity(
+                                    label = "New schedule",
+                                    strategyId = "differs_with_recovery",
+                                    startAt = app.timeInMillis,
+                                    recurring = "once",
+                                    stopAt = 0L,
+                                    accountKind = "DEMO",
+                                    enabled = true
+                                )
+                            )
+                        }) {
+                            Text(text = "Add", color = VividYellow, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (scheduledRuns.isEmpty()) {
+                        Text(
+                            text = "No schedules yet. Add one to trade at a set time without staying at the phone.",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    } else {
+                        scheduledRuns.forEach { run ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFF1B1E28), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        text = scheduleSummary(run),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary
+                                    )
+                                    Text(text = "${run.accountKind} · ${run.label.ifBlank { run.strategyId }}", fontSize = 10.sp, color = TextSecondary)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = if (run.enabled) "ON" else "OFF",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (run.enabled) StatGreen else TextSecondary
+                                    )
+                                    Text(
+                                        text = "Delete",
+                                        fontSize = 11.sp,
+                                        color = StatRed,
+                                        modifier = Modifier.clickable { onDeleteSchedule(run.id) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Keeping the overnight run alive: the exemption that keeps Doze from waking the
+                    // phone late and killing it. Shown as a state, not a mystery toggle.
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(text = "Battery optimisation", fontSize = 12.sp, color = TextPrimary)
+                            Text(
+                                text = if (batteryExempt) "Exempt — overnight runs can survive"
+                                else "On by the system — a long overnight run may be interrupted",
+                                fontSize = 10.sp,
+                                color = if (batteryExempt) StatGreen else TextSecondary
+                            )
+                        }
+                        TextButton(onClick = onRequestBatteryExemption, enabled = !batteryExempt) {
+                            Text(
+                                text = if (batteryExempt) "Exempt" else "Request exemption",
+                                color = if (batteryExempt) StatGreen else VividYellow,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -409,26 +543,23 @@ fun SettingsScreen(
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
-            title = { Text(text = "Delete Trade & Analysis History", color = TextPrimary, fontWeight = FontWeight.Bold) },
+            title = { Text(text = "Reset stats", color = TextPrimary, fontWeight = FontWeight.Bold) },
             text = {
                 Column {
                     Text(
-                        text = "This permanently deletes, for your signed-in account only:",
+                        text = "Zeros the running counters on every strategy — the stop-loss streak, " +
+                            "the net daily-loss figure, the session profit and the recovery ladder.",
                         color = TextSecondary
                     )
                     Text(
-                        text = "• Trade history on account " +
-                            (activeAccount?.id ?: "unknown") +
-                            (if (activeAccount?.kind == com.tickedge.data.deriv.DerivAccountKind.REAL) " (REAL)" else " (DEMO)"),
+                        text = "No trade, analysis or cloud record is touched. Every row in your " +
+                            "history stays exactly as it is; only the figures that count " +
+                            "down from your limits read back to zero.",
                         color = TextSecondary,
-                        modifier = Modifier.padding(top = 4.dp)
+                        modifier = Modifier.padding(top = 8.dp)
                     )
                     Text(
-                        text = "• All recorded analysis events for your user",
-                        color = TextSecondary
-                    )
-                    Text(
-                        text = "History on your other account is kept. This cannot be undone.",
+                        text = "Use this after a run you want to count from zero again.",
                         color = StatRed,
                         modifier = Modifier.padding(top = 6.dp)
                     )
@@ -437,16 +568,62 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        onClearHistoryClick()
+                        onResetStatsClick()
                         showResetDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = StatRed, contentColor = Color.White)
                 ) {
-                    Text(text = "Clear All")
+                    Text(text = "Reset stats")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showResetDialog = false }) {
+                    Text(text = "Cancel", color = TextSecondary)
+                }
+            },
+            containerColor = SurfaceDarkCard
+        )
+    }
+
+    if (showResetHistoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetHistoryDialog = false },
+            title = { Text(text = "Reset trade history", color = TextPrimary, fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(
+                        text = "Deletes the trade + session + analysis record for every user on " +
+                            "this device, and the signed-in user's cloud copy.",
+                        color = TextSecondary
+                    )
+                    Text(
+                        text = "Settings and your account stay. This is how the new system starts " +
+                            "from a clean record.",
+                        color = TextSecondary,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Text(
+                        text = if (canResetHistory) "This cannot be undone." else
+                            "Sign in to the TickEdge cloud account first, so the cloud copy is cleared too.",
+                        color = StatRed,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onResetHistoryClick()
+                        showResetHistoryDialog = false
+                    },
+                    enabled = canResetHistory,
+                    colors = ButtonDefaults.buttonColors(containerColor = StatRed, contentColor = Color.White)
+                ) {
+                    Text(text = "Delete history")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetHistoryDialog = false }) {
                     Text(text = "Cancel", color = TextSecondary)
                 }
             },
@@ -483,6 +660,22 @@ fun SettingsScreen(
             },
             containerColor = SurfaceDarkCard
         )
+    }
+}
+
+/**
+ * One line for a schedule: what it does and when. A "once" run shows the fixed start; a recurring
+ * one shows the time-of-day and cadence, so the card reads the way the schedule actually fires.
+ */
+private fun scheduleSummary(run: com.tickedge.data.local.ScheduledRunEntity): String {
+    val strategy = com.tickedge.domain.StrategyCatalog.find(run.strategyId).name
+    return when (run.recurring) {
+        "daily" -> "Daily ${run.timeOfDay} · $strategy"
+        "weekly" -> "Weekly ${run.timeOfDay} · $strategy"
+        else -> run.startAt.let {
+            if (it > 0L) "Once · ${java.text.SimpleDateFormat("d MMM HH:mm", java.util.Locale.US).format(java.util.Date(it))} · $strategy"
+            else "One-shot · $strategy"
+        }
     }
 }
 

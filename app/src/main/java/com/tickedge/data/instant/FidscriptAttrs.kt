@@ -100,4 +100,47 @@ object FidscriptAttrs {
     /** Loss outstanding when this trade was placed — what the rung was trying to clear. */
     const val TRADE_HISTORY_OUTSTANDINGBEFORE = "5d832d07-2550-44e8-b503-62375279af3f"
     const val TRADE_HISTORY_OPENEDAT = "ddd72330-c93e-4774-a3f5-4446afe8bf97"
+
+    // ---- sessions ----
+    //
+    // One cloud row per trading session, so every signed-in device renders the *same* live
+    // record: this phone opens it, others watch its P&L, and a stop on any one of them is what
+    // the run_control namespace below carries.
+    //
+    // Pushed to the live server 2026-11-01 and every id below read back from `get-schema`
+    // (the blobs, not the admin endpoint), the same round-trip discipline as the trade-detail
+    // attributes above.
+    const val NS_SESSIONS = "sessions"
+    const val SESSIONS_ID = "83133225-36d5-4fcc-bfb3-69b38f6caaba"
+    const val SESSIONS_USERID = "094f4c5a-cf1e-4e44-a31a-c67effdd118f"
+    const val SESSIONS_SESSIONID = "1ca2f43c-cc36-4852-ad73-3dd5b7362cf5"
+    const val SESSIONS_STRATEGYID = "5845e657-d871-4afc-8b55-4cc3dab937f4"
+    const val SESSIONS_STRATEGY = "ff747d18-bb4d-4c56-af64-e88b7349ba8d"
+    const val SESSIONS_ISREAL = "ea34a21a-ed32-4b54-844c-69f7af1670ff"
+    const val SESSIONS_ACCOUNTID = "dd14b078-a8ca-4565-802c-398e4ca30cc2"
+    const val SESSIONS_STATUS = "dbe1f7e8-3948-4334-aa6a-b273b31ed5a1"
+    const val SESSIONS_STARTEDAT = "45452cbc-d25f-402b-94ff-6fd35e1ee5dc"
+    const val SESSIONS_ENDEDAT = "c56233a8-be1a-420e-b8f1-ec28bfc554fe"
+    const val SESSIONS_TOTALTRADES = "eb9db5ec-f0df-4661-b5f4-20c75cc4561c"
+    const val SESSIONS_WINCOUNT = "b422bd93-391a-4ddc-9169-0859c33aa961"
+    const val SESSIONS_LOSSCOUNT = "d0816d47-80a0-4639-b2de-142d9a46de83"
+    const val SESSIONS_NETPROFIT = "ec2ca58c-a366-4467-a45e-45d3072ced87"
+    const val SESSIONS_GROSSPROFIT = "41a8ba63-a065-4d20-ac09-7d81a66ff080"
+    const val SESSIONS_GROSSLOSS = "37074290-e57a-42a2-8e97-a3612ce596c0"
+    const val SESSIONS_TOTALSTAKED = "881a472b-de42-451b-b1be-757097d7f7a2"
+    const val SESSIONS_INITIALSIMULATEDBALANCE = "1abd663d-5371-47fa-9de7-7e5f5364246f"
+    const val SESSIONS_CURRENTSIMULATEDBALANCE = "7b75ec39-b208-40ce-ab53-8092ec74d742"
+    const val SESSIONS_UPDATEDAT = "3c1d1109-60cf-4b41-b06c-f7f52cbd3d65"
+
+    // ---- run_control ----
+    //
+    // One cloud row per person: the shared stop channel. A device that wants every other device to
+    // stop trading writes `stopRequested = true`; each device's poll picks that up and stops its
+    // engines. This is what "stop on one phone, stop on the other" is.
+    const val NS_RUN_CONTROL = "run_control"
+    const val RUN_CONTROL_ID = "57cf3ed3-765e-4b0b-8ea1-dd3d15916b1a"
+    const val RUN_CONTROL_USERID = "0ca4c536-31f3-4fc2-bcc1-87079ebb76d0"
+    const val RUN_CONTROL_STOPREQUESTED = "b66fae0e-4341-466a-a978-ced8752dc64d"
+    const val RUN_CONTROL_STOPREQUESTEDAT = "59323f84-b387-433c-b1b7-79c833afe513"
+    const val RUN_CONTROL_UPDATEDAT = "73ce5934-2dea-4d46-b151-e8223ddfdb26"
 }

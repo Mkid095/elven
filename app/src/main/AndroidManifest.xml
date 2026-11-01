@@ -20,6 +20,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        The exact start/stop alarms a schedule programs. EXACT_ALARM lets the phone wake at the
+        precise moment the user picked; SCHEDULE is the fallback some OEMs honour instead.
+
+        No RECEIVE_BOOT_COMPLETED permission is requested: the reboot re-arm is delivered to
+        ScheduleAlarmReceiver via the app's own ACTION_SCHEDULES_CHANGED trigger, and a cold boot
+        without the permission is a best-effort case the user can re-arm from settings.
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!--
+        Lets the app ask to be exempt from battery optimisation so an overnight schedule survives
+        Doze. Without the prompt the foreground service is the only protection and aggressive OEMs
+        still kill it; with it the user can grant the exemption.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -100,6 +117,20 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+
+        <!--
+            Re-arms scheduled runs after a reboot and when a schedule is saved. Not exported: only
+            the system and this app's own service PendingIntent ever reach it. BOOT_COMPLETED is
+            best-effort (no permission requested) — the app re-arms on its own launch as well.
+        -->
+        <receiver
+            android:name=".domain.ScheduleAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.tickedge.action.SCHEDULES_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

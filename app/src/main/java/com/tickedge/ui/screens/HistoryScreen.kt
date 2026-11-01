@@ -68,17 +68,38 @@ import java.util.Locale
  * Grouped rather than filtered in place so a demo trade can never end up sitting between two live
  * ones — an interleaved list reads as a single record, and the reader has no way to know the
  * boundary was crossed.
+ *
+ * `settled` and `netPnl` are computed once, in the constructor, rather than as `val get()`:
+ * with an uncapped list the getters would walk the whole record on every recomposition, and the
+ * LazyColumn recomposes whenever a trade settles.
  */
 private data class AccountBlock(
     val isReal: Boolean,
     val positions: List<SimulationPositionEntity>,
     val sessions: List<SimulationSessionEntity>
 ) {
-    val settled: List<SimulationPositionEntity>
-        get() = positions.filter { it.outcome == "WON" || it.outcome == "LOST" }
+    val settled: List<SimulationPositionEntity> =
+        positions.filter { it.outcome == "WON" || it.outcome == "LOST" }
 
-    val netPnl: Double get() = positions.sumOf { it.simulatedNetResult }
+    val netPnl: Double = positions.sumOf { it.simulatedNetResult }
 }
+
+/**
+ * The display strings for one trade row, computed once per row.
+ *
+ * The LazyColumn recycles rows as the user scrolls, and every settle re-emits the positions list,
+ * so running `Date`/`String.format`/`strategyOf` inline would redo them on every recomposition of
+ * every visible row. The values are built in the `remember` keyed to the entity, which only
+ * re-runs when the row's data actually changes.
+ */
+private data class TradeRowView(
+    val pos: SimulationPositionEntity,
+    val timeText: String,
+    val typeText: String,
+    val betText: String,
+    val pnlText: String,
+    val riskTier: String
+)
 
 @Composable
 fun HistoryScreen(
@@ -346,6 +367,26 @@ fun HistoryScreen(
                         }
                     } else {
                         items(shown, key = { "trade_${it.contractId}_${block.isReal}" }) { pos ->
+                            // The row's display strings, built once and cached per row: with an
+                            // uncapped list, running `Date`/`String.format`/`strategyOf` on every
+                            // recomposition is what made the page freeze. The key is the entity,
+                            // so the cache only re-runs when the trade itself changes.
+                            val row = remember(pos) {
+                                TradeRowView(
+                                    pos = pos,
+                                    timeText = timeFormatter.format(Date(pos.settledAt)),
+                                    typeText = typeLabel(pos),
+                                    betText = betLabel(pos),
+                                    pnlText = String.format(
+                                        Locale.US,
+                                        "%s$%.2f",
+                                        if (pos.outcome == "WON") "+" else "",
+                                        pos.simulatedNetResult
+                                    ),
+                                    riskTier = StrategyCatalog.find(strategyOf(pos)).risk.tier
+                                )
+                            }
+                            val isWin = row.pos.outcome == "WON"
                             Card(
                                 colors = CardDefaults.cardColors(containerColor = SurfaceDarkCard),
                                 shape = RoundedCornerShape(10.dp),
@@ -359,8 +400,8 @@ fun HistoryScreen(
                                 // the target.
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onSelectTrade(pos) }
-                                    .testTag("trade_row_${pos.contractId}")
+                                    .clickable { onSelectTrade(row.pos) }
+                                    .testTag("trade_row_${row.pos.contractId}")
                             ) {
                                 Row(
                                     modifier = Modifier
@@ -370,20 +411,20 @@ fun HistoryScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = timeFormatter.format(Date(pos.settledAt)),
+                                        text = row.timeText,
                                         fontSize = 12.sp,
                                         color = TextSecondary,
                                         modifier = Modifier.width(42.dp)
                                     )
                                     Text(
-                                        text = pos.marketName,
+                                        text = row.pos.marketName,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = TextPrimary,
                                         modifier = Modifier.width(56.dp)
                                     )
                                     Text(
-                                        text = typeLabel(pos),
+                                        text = row.typeText,
                                         fontSize = 12.sp,
                                         color = TextSecondary,
                                         modifier = Modifier.width(52.dp)
@@ -393,27 +434,30 @@ fun HistoryScreen(
                                     // the parity class, and printing the 0/9 encoding would read as
                                     // "the bot bet on 9" — which it did not.
                                     Text(
-                                        text = betLabel(pos),
+                                        text = row.betText,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = VividYellow,
                                         modifier = Modifier.width(38.dp)
                                     )
-                                    val isWin = pos.outcome == "WON"
-                                    val pnlSign = if (isWin) "+" else ""
                                     // The badge sits on the row itself, not only on the section
                                     // header above it. A screenshot cropped to a single line of
                                     // results would otherwise carry the profit figure and nothing
                                     // about whether it was real money.
                                     Column(horizontalAlignment = Alignment.End) {
-                                        AccountChip(isReal = pos.isReal)
+                                        AccountChip(isReal = row.pos.isReal)
                                         Text(
-                                            text = String.format(
-                                                Locale.US, "%s$%.2f", pnlSign, pos.simulatedNetResult
-                                            ),
+                                            text = row.pnlText,
                                             fontSize = 14.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = if (isWin) StatGreen else StatRed
+                                        )
+                                        // Which strategy placed this trade, and its risk tier, so
+                                        // a row can be read without opening the detail sheet.
+                                        Text(
+                                            text = row.riskTier,
+                                            fontSize = 10.sp,
+                                            color = TextSecondary
                                         )
                                     }
                                 }
@@ -566,6 +610,23 @@ fun HistoryScreen(
                                     Text(text = String.format(Locale.US, "$%.2f", totalReturn), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = VividYellow)
                                 }
                             }
+
+                            // What risk the P&L is built from, stated on the card itself: a
+                            // strategy-scoped card shows that strategy's tier and win rate;
+                            // "All strategies" names both, since their blended figure hides the
+                            // difference.
+                            Text(
+                                text = when (pnlStrategy) {
+                                    "Differs" -> "Differs · " +
+                                        StrategyCatalog.DIFFERS_WITH_RECOVERY.risk.label
+                                    "Even / Odd" -> "Even/Odd · " +
+                                        StrategyCatalog.EVEN_ODD.risk.label
+                                    else -> "Differs " + StrategyCatalog.DIFFERS_WITH_RECOVERY.risk.label +
+                                        " · Even/Odd " + StrategyCatalog.EVEN_ODD.risk.label
+                                },
+                                fontSize = 11.sp,
+                                color = StatRed
+                            )
 
                             // Chart
                             val chartPoints = if (inPeriod.isNotEmpty()) {
@@ -764,6 +825,19 @@ private fun TradeDetailSheet(
 
             Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 DetailRow("Strategy", strategyLabel)
+                // Which strategy placed it is a fact the user can only read from the row's own
+                // stamp, so the risk that strategy carries goes with it — a trade is never shown
+                // without saying what risk it was taken on.
+                DetailRow(
+                    "Risk",
+                    when {
+                        trade.strategyId.isNotEmpty() ->
+                            StrategyCatalog.find(trade.strategyId).risk.label
+                        trade.scenarioType.contains("Even", ignoreCase = true) ->
+                            StrategyCatalog.EVEN_ODD.risk.label
+                        else -> StrategyCatalog.DIFFERS_WITH_RECOVERY.risk.label
+                    }
+                )
                 DetailRow(
                     "Prediction / barrier",
                     if (strategyLabel.startsWith("Even")) {
@@ -979,9 +1053,12 @@ private fun SessionRow(session: SimulationSessionEntity) {
                         )
                         AccountChip(isReal = session.isReal)
                         // Whose run this was, stated on the row itself: a day can hold a Differs
-                        // session and an Even/Odd one, and the totals below belong to both.
+                        // session and an Even/Odd one, and the totals below belong to both. The
+                        // risk tier rides on the name so a session card never shows a strategy
+                        // without its risk.
                         Text(
-                            text = session.strategy,
+                            text = session.strategy + " · " +
+                                StrategyCatalog.find(session.strategy).risk.tier,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = VividYellow
@@ -1025,16 +1102,24 @@ private fun SessionRow(session: SimulationSessionEntity) {
                 color = TextSecondary
             )
 
-            if (session.initialSimulatedBalance > 0.0 || session.currentSimulatedBalance > 0.0) {
+            // The balance arrow is only shown when the opening balance was actually captured: a
+            // session that opened before the balance had loaded records 0 as its "initial", and
+            // "Balance $0.00 → $2143.00" then reads as a fictional trip from nothing to the whole
+            // account. The P&L above is the real figure — it is SQL over the settled trades.
+            if (session.initialSimulatedBalance > 0.0) {
                 Text(
                     text = "Balance ${String.format(Locale.US, "$%.2f", session.initialSimulatedBalance)}" +
-                        " → ${String.format(Locale.US, "$%.2f", session.currentSimulatedBalance)}" +
-                        " · closed ${fullFormat.format(Date(session.startedAt))}" +
-                        (session.endedAt?.let { " · ended ${fullFormat.format(Date(it))}" } ?: ""),
+                        " → ${String.format(Locale.US, "$%.2f", session.currentSimulatedBalance)}",
                     fontSize = 10.sp,
                     color = TextSecondary.copy(alpha = 0.8f)
                 )
             }
+            Text(
+                text = "closed ${fullFormat.format(Date(session.startedAt))}" +
+                    (session.endedAt?.let { " · ended ${fullFormat.format(Date(it))}" } ?: ""),
+                fontSize = 10.sp,
+                color = TextSecondary.copy(alpha = 0.8f)
+            )
         }
     }
 }

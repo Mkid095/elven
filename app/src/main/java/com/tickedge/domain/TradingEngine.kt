@@ -587,10 +587,11 @@ class TradingEngine(
                         StopNotice(
                             kind = StopKind.DAILY_LIMIT,
                             title = "Trading stopped — daily loss limit reached",
-                            detail = "Today's losses reached ${fmtMoney(dailyLoss)}, at or past " +
+                            detail = "Today's net losses reached ${fmtMoney(dailyLoss)}, at or past " +
                                 "your daily limit of ${fmtMoney(config.maxDailyLoss)}. No new " +
-                                "orders will be placed today. This figure is not reduced by a win " +
-                                "later in the day — the money was lost either way."
+                                "orders will be placed today. This is a net figure: a win that " +
+                                "recovered a loss took it off the total, so what is left is what " +
+                                "is genuinely still down."
                         )
                     }
                     _simState.value = SimulatorState.STOPPED
@@ -1480,8 +1481,12 @@ class TradingEngine(
             // caused the ladder has been recovered. Counting it against the stop loss anyway meant
             // the bot kept counting a debt it had already paid: the user's stop loss was reached
             // by losses the account no longer had, and the run halted on money that was never lost.
-            lossAccounting.recordWin()
+            lossAccounting.recordWin(netResult)
             _streakLoss.value = lossAccounting.streakLoss
+            // A win also takes the daily limit off the losses it recovered, so publish the
+            // reduced figure: the limit check on the next loop pass must not still see the
+            // pre-win number.
+            _dailyLossAccumulated.value = lossAccounting.dailyLoss
         } else {
             streakLossCount++
             _consecutiveLosses.value = streakLossCount
@@ -1492,8 +1497,9 @@ class TradingEngine(
             //
             // `_streakLoss` is what the *stop loss* reads: the cost of the losing streak in
             // progress, reset by the win that recovers it. `_dailyLossAccumulated` is what the
-            // *daily limit* reads: everything lost today, which a win does not erase — the money
-            // is gone even if it was later earned back.
+            // *daily limit* reads: the day's **net** losses — what is still down today. A win
+            // takes the losses it recovered off the daily figure (see the win branch above), so
+            // the limit does not stay tripped on money the account won back.
             //
             // They used to be the same counter, so the stop loss was really the daily limit wearing
             // a different name, and neither could be reasoned about on its own.
@@ -1679,9 +1685,27 @@ class TradingEngine(
         return true
     }
 
-    fun resetDailyLoss() {
+    /**
+     * Zero the complete loss/risk accumulator set — the user's "start fresh", distinct from a run
+     * boundary.
+     *
+     * Unlike [clearRunState] this also touches `lossAccounting`: a stats reset is the user saying
+     * "count me from zero again", so both the streak and the *net* daily figure clear. The
+     * cool-off and skip list are deliberately left alone — they hold no money hostage, they expire
+     * on their own, and a stats reset that erased them would let the bot re-trade a market it
+     * was still cooling off on.
+     */
+    fun resetRiskStats() {
+        lossAccounting.resetAll()
         _dailyLossAccumulated.value = 0.0
+        _streakLoss.value = 0.0
+        _sessionProfit.value = 0.0
+        _consecutiveLosses.value = 0
         streakLossCount = 0
+        recoveryOutstanding = 0.0
+        recoveryScanPolls = 0
+        recoveryOnAlternate = false
+        publishRunState { it.copy(trades = 0, wins = 0, losses = 0, netPnl = 0.0, consecutiveLosses = 0) }
     }
 
     private fun selectMarket(

@@ -14,9 +14,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AnalysisEventEntity::class,
         SimulationSessionEntity::class,
         SimulationPositionEntity::class,
-        StrategySettingsEntity::class
+        StrategySettingsEntity::class,
+        ScheduledRunEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -25,6 +26,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun analysisEventDao(): AnalysisEventDao
     abstract fun simulationDao(): SimulationDao
     abstract fun strategySettingsDao(): StrategySettingsDao
+    abstract fun scheduledRunDao(): ScheduledRunDao
 
     companion object {
         @Volatile
@@ -583,6 +585,43 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Version 17: the scheduled-runs table.
+         *
+         * One new table, purely additive — no existing table changes, so no FK or seed work. A
+         * scheduled run is how the bot starts and stops itself on a time with no person at the
+         * phone; the scheduler receiver reads these rows to know what to fire. `userId` is a
+         * cascade child of `profiles`, matching every other per-user table, so a sign-out takes
+         * a person's schedules with their record.
+         */
+        private val MIGRATION_16_TO_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `scheduled_runs` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                        `userId` TEXT NOT NULL,
+                        `strategyId` TEXT NOT NULL,
+                        `label` TEXT NOT NULL DEFAULT '',
+                        `startAt` INTEGER NOT NULL DEFAULT 0,
+                        `stopAt` INTEGER NOT NULL DEFAULT 0,
+                        `recurring` TEXT NOT NULL DEFAULT 'once',
+                        `timeOfDay` TEXT NOT NULL DEFAULT '',
+                        `dayOfWeek` INTEGER NOT NULL DEFAULT 1,
+                        `durationMinutes` INTEGER NOT NULL DEFAULT 60,
+                        `enabled` INTEGER NOT NULL DEFAULT 1,
+                        `accountKind` TEXT NOT NULL DEFAULT 'DEMO',
+                        `createdAt` INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY (`userId`) REFERENCES `profiles`(`id`) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scheduled_runs_userId` ON `scheduled_runs` (`userId`)"
+                )
+            }
+        }
+
+        /**
          * Every migration, in order.
          *
          * Exposed so the migration chain can be tested against the exported schemas without a
@@ -596,7 +635,8 @@ abstract class AppDatabase : RoomDatabase() {
         internal val ALL_MIGRATIONS: List<Migration> = listOf(
             MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7, MIGRATION_7_TO_8,
             MIGRATION_8_TO_9, MIGRATION_9_TO_10, MIGRATION_10_TO_11, MIGRATION_11_TO_12,
-            MIGRATION_12_TO_13, MIGRATION_13_TO_14, MIGRATION_14_TO_15, MIGRATION_15_TO_16
+            MIGRATION_12_TO_13, MIGRATION_13_TO_14, MIGRATION_14_TO_15, MIGRATION_15_TO_16,
+            MIGRATION_16_TO_17
         )
     }
 }

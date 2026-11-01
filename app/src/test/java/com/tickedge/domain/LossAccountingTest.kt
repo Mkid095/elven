@@ -26,15 +26,37 @@ class LossAccountingTest {
     }
 
     @Test
-    fun `a win resets the streak but not the day`() {
+    fun `a win resets the streak and reduces the day`() {
         val accounting = LossAccounting()
         accounting.recordLoss(1.50)
-        accounting.recordWin()
+        accounting.recordWin(1.50)
 
         // The streak is over, so the stop loss starts again.
         assertEquals(0.0, accounting.streakLoss, 0.0001)
-        // The day's total stands: the money was lost, even though it was earned back.
-        assertEquals(1.50, accounting.dailyLoss, 0.0001)
+        // The win recovered the day's loss, so the net daily figure is back to zero.
+        assertEquals(0.0, accounting.dailyLoss, 0.0001)
+    }
+
+    @Test
+    fun `a partial win reduces but does not clear the day`() {
+        // The recovery ladder's case: a loss is mostly recovered but not fully — the remainder
+        // stands against the limit, and only the remainder.
+        val accounting = LossAccounting()
+        accounting.recordLoss(20.00)
+        accounting.recordWin(6.00)
+
+        assertEquals(14.00, accounting.dailyLoss, 0.0001)
+        assertFalse("still under the 20 limit", accounting.isDailyLimitHit(20.00))
+        assertTrue("at the 14 limit", accounting.isDailyLimitHit(14.00))
+    }
+
+    @Test
+    fun `a win larger than the day's loss floors the daily figure at zero`() {
+        val accounting = LossAccounting()
+        accounting.recordLoss(5.00)
+        accounting.recordWin(12.00)
+
+        assertEquals(0.0, accounting.dailyLoss, 0.0001)
     }
 
     @Test
@@ -47,7 +69,7 @@ class LossAccountingTest {
 
         assertTrue("the loss itself should reach the stop loss", accounting.isStopLossHit(2.00))
 
-        accounting.recordWin()
+        accounting.recordWin(2.00)
 
         assertFalse(
             "a recovered loss must not count against the stop loss",
@@ -56,15 +78,16 @@ class LossAccountingTest {
     }
 
     @Test
-    fun `the daily limit still counts a recovered loss`() {
+    fun `a win between two losses clears the streak and the recovered day`() {
         val accounting = LossAccounting()
-        accounting.recordLoss(20.00)
-        accounting.recordWin()
+        accounting.recordLoss(1.00)
+        accounting.recordWin(0.40)
+        accounting.recordLoss(0.50)
 
-        assertTrue(
-            "the daily budget is not undone by a win",
-            accounting.isDailyLimitHit(20.00)
-        )
+        // The new streak stands on its own: the second loss is 0.50 deep, not 1.50.
+        assertEquals(0.50, accounting.streakLoss, 0.0001)
+        // The day keeps the net: 1.00 lost, 0.40 recovered, 0.50 lost again.
+        assertEquals(1.10, accounting.dailyLoss, 0.0001)
     }
 
     @Test
@@ -74,19 +97,6 @@ class LossAccountingTest {
         accounting.recordLoss(1.50)
 
         assertEquals(2.50, accounting.streakLoss, 0.0001)
-    }
-
-    @Test
-    fun `a win between two losses clears only the first`() {
-        val accounting = LossAccounting()
-        accounting.recordLoss(1.00)
-        accounting.recordWin()
-        accounting.recordLoss(0.50)
-
-        // The new streak stands on its own: the second loss is 0.50 deep, not 1.50.
-        assertEquals(0.50, accounting.streakLoss, 0.0001)
-        // The day keeps everything.
-        assertEquals(1.50, accounting.dailyLoss, 0.0001)
     }
 
     @Test

@@ -277,6 +277,13 @@ private fun StrategyCard(
                 fontWeight = FontWeight.SemiBold,
                 color = VividYellow
             )
+            // The risk the strategy carries, stated up front: the tier and an approximate win rate.
+            Text(
+                text = strategy.risk.label,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = StatRed
+            )
             Text(
                 text = strategy.description,
                 fontSize = 12.sp,
@@ -304,7 +311,8 @@ private fun StrategyCard(
                         color = if (runState.isRunning) VividYellow else TextSecondary
                     )
                     Text(
-                        text = "${runState.tradesLabel} · ${runState.pnlLabel}",
+                        text = "This run · " +
+                            "${runState.tradesLabel} · ${runState.pnlLabel}",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
                         color = if (runState.netPnl >= 0) StatGreen else StatRed

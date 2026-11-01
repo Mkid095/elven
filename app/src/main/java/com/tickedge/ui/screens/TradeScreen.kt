@@ -437,6 +437,16 @@ fun TradeScreen(
                             )
                         }
 
+                        // The risk this strategy carries, so the next trade is read with its
+                        // tier rather than as an abstract number: High or Low risk, with the
+                        // win rate the strategy is playing for.
+                        Text(
+                            text = strategy.risk.label,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = StatRed
+                        )
+
                         Text(
                             text = when (nextTrade.tradeType) {
                                 TradeType.EVEN_ODD -> {
