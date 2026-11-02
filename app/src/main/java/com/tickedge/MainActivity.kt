@@ -160,6 +160,9 @@ fun TickEdgeApp(
     val accountSessions by viewModel.accountSessions.collectAsStateWithLifecycle()
     val sessionSummary by viewModel.sessionSummary.collectAsStateWithLifecycle()
     val lastConfirmedTrade by viewModel.lastConfirmedTrade.collectAsStateWithLifecycle()
+    val sessionPositions by viewModel.sessionPositions.collectAsStateWithLifecycle()
+    val detailSession by viewModel.detailSession.collectAsStateWithLifecycle()
+    val detailSessionTrades by viewModel.detailSessionTrades.collectAsStateWithLifecycle()
     val scanState by viewModel.scanState.collectAsStateWithLifecycle()
     // Why the bot halted by itself. Null while it is running, and after the user pressed Stop.
     val stopNotice by viewModel.stopNotice.collectAsStateWithLifecycle()
@@ -391,14 +394,17 @@ fun TickEdgeApp(
                     }
                 )
                 "history" -> HistoryScreen(
-                    // Both accounts' records, not just the one in use. The screen partitions them
-                    // into separate blocks — live above demo, each with its own totals and border —
-                    // so every record stays visible without ever being summed together.
-                    positions = pastPositions,
-                    sessions = sessions,
+                    // Active-session-first: the header, the Trades tab and the P&L tab all show the
+                    // current run only (live). Past runs are archived under the Sessions tab and
+                    // opened one at a time in the detail sheet, so the main lists never accumulate.
                     activeSession = activeSession,
                     sessionSummary = sessionSummary,
                     lastConfirmedTrade = lastConfirmedTrade,
+                    sessionTrades = sessionPositions,
+                    sessions = sessions,
+                    detailSession = detailSession,
+                    detailTrades = detailSessionTrades,
+                    onOpenSessionDetail = { viewModel.openSessionDetail(it) },
                     activeAccountIsReal = activeAccountType == AccountType.LIVE
                 )
                 "settings" -> SettingsScreen(

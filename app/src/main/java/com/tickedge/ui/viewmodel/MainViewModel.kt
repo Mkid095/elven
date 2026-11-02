@@ -1294,6 +1294,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /**
+     * The session the user has opened for detail (P&L graph + its trades), from the Sessions tab.
+     *
+     * Distinct from [activeSession]: this can point at any session — an archived one the user
+     * tapped to review — not just the running one. [detailSessionTrades] follows it, so the detail
+     * sheet shows that one session's trades, not the whole record.
+     */
+    private val _detailSession = MutableStateFlow<SimulationSessionEntity?>(null)
+    val detailSession: StateFlow<SimulationSessionEntity?> = _detailSession.asStateFlow()
+
+    val detailSessionTrades: StateFlow<List<SimulationPositionEntity>> = _detailSession
+        .flatMapLatest { s ->
+            val id = s?.id
+            if (id == null) flowOf(emptyList())
+            else db.simulationDao().getPositionsForSession(currentUserId, id)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Open (or clear, with null) the session shown in the detail sheet. */
+    fun openSessionDetail(session: SimulationSessionEntity?) {
+        _detailSession.value = session
+    }
+
+    /**
      * Open a session for this run, or reuse the one already in progress.
      *
      * Reuse matters because Start can be pressed again after a stop that did not close cleanly;
