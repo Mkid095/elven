@@ -15,9 +15,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SimulationSessionEntity::class,
         SimulationPositionEntity::class,
         StrategySettingsEntity::class,
-        ScheduledRunEntity::class
+        ScheduledRunEntity::class,
+        CloudSessionEntity::class
     ],
-    version = 17,
+    version = 18,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -27,6 +28,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun simulationDao(): SimulationDao
     abstract fun strategySettingsDao(): StrategySettingsDao
     abstract fun scheduledRunDao(): ScheduledRunDao
+    abstract fun cloudSessionDao(): CloudSessionDao
 
     companion object {
         @Volatile
@@ -622,6 +624,50 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
+         * Version 18: the cloud-session mirror table.
+         *
+         * One row per session this user opened on *another* device, pulled from the FIDScript
+         * `sessions` namespace so a sibling's run shows up in the History Sessions list. Purely
+         * additive: a new table with no foreign keys (it is a read-only mirror, not the local
+         * source of truth), so no seed or re-link work. The unique `cloudEntityId` index is what
+         * makes the pull upsert a replace-rather-than-duplicate.
+         */
+        private val MIGRATION_17_TO_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `cloud_sessions` (
+                        `cloudEntityId` TEXT NOT NULL,
+                        `userId` TEXT NOT NULL,
+                        `cloudSessionId` INTEGER NOT NULL DEFAULT 0,
+                        `accountId` TEXT NOT NULL DEFAULT '',
+                        `isReal` INTEGER NOT NULL DEFAULT 0,
+                        `strategy` TEXT NOT NULL DEFAULT 'Differs',
+                        `strategyId` TEXT NOT NULL DEFAULT '',
+                        `status` TEXT NOT NULL DEFAULT 'ACTIVE',
+                        `startedAt` INTEGER NOT NULL DEFAULT 0,
+                        `endedAt` INTEGER,
+                        `totalTrades` INTEGER NOT NULL DEFAULT 0,
+                        `winCount` INTEGER NOT NULL DEFAULT 0,
+                        `lossCount` INTEGER NOT NULL DEFAULT 0,
+                        `netProfit` REAL NOT NULL DEFAULT 0.0,
+                        `grossProfit` REAL NOT NULL DEFAULT 0.0,
+                        `grossLoss` REAL NOT NULL DEFAULT 0.0,
+                        `totalStaked` REAL NOT NULL DEFAULT 0.0,
+                        `initialSimulatedBalance` REAL NOT NULL DEFAULT 0.0,
+                        `currentSimulatedBalance` REAL NOT NULL DEFAULT 0.0,
+                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (`cloudEntityId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_cloud_sessions_userId` ON `cloud_sessions` (`userId`)"
+                )
+            }
+        }
+
+        /**
          * Every migration, in order.
          *
          * Exposed so the migration chain can be tested against the exported schemas without a
@@ -636,7 +682,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_4_TO_5, MIGRATION_5_TO_6, MIGRATION_6_TO_7, MIGRATION_7_TO_8,
             MIGRATION_8_TO_9, MIGRATION_9_TO_10, MIGRATION_10_TO_11, MIGRATION_11_TO_12,
             MIGRATION_12_TO_13, MIGRATION_13_TO_14, MIGRATION_14_TO_15, MIGRATION_15_TO_16,
-            MIGRATION_16_TO_17
+            MIGRATION_16_TO_17, MIGRATION_17_TO_18
         )
     }
 }

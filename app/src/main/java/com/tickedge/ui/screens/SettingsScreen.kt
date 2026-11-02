@@ -90,6 +90,10 @@ fun SettingsScreen(
     /** Whether the OS currently keeps the app out of battery optimisation. */
     batteryExempt: Boolean = false,
     onRequestBatteryExemption: () -> Unit = {},
+    /** Whether this device can fire the schedules at their exact picked times. */
+    exactAlarmsAvailable: Boolean = true,
+    /** Opens the system "schedule exact alarms" screen so the user can grant precise firing. */
+    onRequestExactAlarms: () -> Unit = {},
     onSignOutClick: () -> Unit = {},
     /** Saves the trader's display name. */
     onSaveProfileName: (String) -> Unit = {},
@@ -484,6 +488,34 @@ fun SettingsScreen(
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
+                        }
+                    }
+
+                    // Precise firing. Some devices let the app fire at the exact picked time; a
+                    // Play install drops USE_EXACT_ALARM and some OEMs keep it off, in which case
+                    // the schedules still arm but only inexact — offer the grant when it is missing.
+                    if (!exactAlarmsAvailable) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(text = "Exact alarms", fontSize = 12.sp, color = TextPrimary)
+                                Text(
+                                    text = "Not available — schedules will fire at the nearest allowed time",
+                                    fontSize = 10.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                            TextButton(onClick = onRequestExactAlarms) {
+                                Text(
+                                    text = "Request exact alarms",
+                                    color = VividYellow,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }

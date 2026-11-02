@@ -53,6 +53,83 @@ data class ScheduledRunEntity(
 )
 
 /**
+ * A trading session this user owns but that was opened on *another* device.
+ *
+ * The shared-session system publishes every session to the FIDScript `sessions` namespace; this row
+ * is that namespace pulled back into Room so a sibling device's run shows up in the History
+ * Sessions list with its own running P&L. It is a read-only mirror: this device never opens, edits,
+ * or closes it — the owning device drives the lifecycle and re-publishes as the run progresses, and
+ * this pull just follows.
+ *
+ * The primary key is the deterministic cloud entity id, so re-pulling the same session REPLACEs the
+ * row rather than duplicating it. [cloudSessionId] is the owning device's Room session id; it is
+ * what a pull uses to tell "mine" (already present locally, excluded) from "theirs" (shown).
+ */
+@Entity(
+    tableName = "cloud_sessions",
+    indices = [Index("userId")]
+)
+data class CloudSessionEntity(
+    @PrimaryKey
+    val cloudEntityId: String,
+    val userId: String,
+    /** The owning device's Room session id (the cloud `sessionId` attribute). */
+    val cloudSessionId: Long = 0L,
+    val accountId: String = "",
+    val isReal: Boolean = false,
+    val strategy: String = "Differs",
+    val strategyId: String = "",
+    val status: String = "ACTIVE",
+    val startedAt: Long = 0L,
+    val endedAt: Long? = null,
+    val totalTrades: Int = 0,
+    val winCount: Int = 0,
+    val lossCount: Int = 0,
+    val netProfit: Double = 0.0,
+    val grossProfit: Double = 0.0,
+    val grossLoss: Double = 0.0,
+    val totalStaked: Double = 0.0,
+    val initialSimulatedBalance: Double = 0.0,
+    val currentSimulatedBalance: Double = 0.0,
+    val updatedAt: Long = 0L
+)
+
+/**
+ * A remote session's stored totals, shown with the same type the local sessions use.
+ *
+ * The [SimulationSessionEntity.id] is derived from the row's cloud entity id (unique per remote
+ * session) and offset well clear of any real auto-increment id, so a pulled row can never be
+ * mistaken for this device's own session and Compose item keys stay distinct from the local ones.
+ * Two remote sessions that happen to share a Room id still get distinct display keys because they
+ * have distinct cloud entity ids. The stored totals are what the Sessions tab renders: a remote
+ * session has no local positions to recompute from, so its `netProfit`/`totalTrades` travel on the
+ * row itself.
+ */
+private const val CLOUD_SESSION_ID_OFFSET = 10_000_000L
+
+fun CloudSessionEntity.asSimulationSessionEntity(): SimulationSessionEntity =
+    SimulationSessionEntity(
+        id = CLOUD_SESSION_ID_OFFSET + (cloudEntityId.hashCode().toLong() and Long.MAX_VALUE),
+        userId = userId,
+        accountId = accountId,
+        isReal = isReal,
+        strategy = strategy,
+        strategyId = strategyId,
+        status = status,
+        startedAt = startedAt,
+        endedAt = endedAt,
+        totalTrades = totalTrades,
+        winCount = winCount,
+        lossCount = lossCount,
+        netProfit = netProfit,
+        grossProfit = grossProfit,
+        grossLoss = grossLoss,
+        totalStaked = totalStaked,
+        initialSimulatedBalance = initialSimulatedBalance,
+        currentSimulatedBalance = currentSimulatedBalance
+    )
+
+/**
  * Local profile per user. Balances are NOT seeded here: live balances come from the real
  * Deriv accounts (see DerivClient). Fields default to neutral/zero.
  *

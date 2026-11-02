@@ -112,6 +112,34 @@ interface ScheduledRunDao {
     suspend fun delete(id: Long)
 }
 
+/**
+ * Sessions opened on another of this user's devices, pulled back from the FIDScript `sessions`
+ * namespace (see [com.tickedge.domain.TradingRuntime.startCloudSessionPull]).
+ *
+ * This is a mirror table, not a source of truth: rows arrive from the cloud and are only ever read
+ * into the History Sessions list or cleared. No insert-from-the-local-life-cycle exists, so there is
+ * no foreign key on `userId` — the owning user's profile could be signed out while a stale mirror
+ * row lingers, and the flow that reads it is always scoped to a signed-in user.
+ */
+@Dao
+interface CloudSessionDao {
+    /** This user's pulled remote sessions, live for the History Sessions list. */
+    @Query("SELECT * FROM cloud_sessions WHERE userId = :userId")
+    fun getForUser(userId: String): Flow<List<CloudSessionEntity>>
+
+    /** Replace-or-insert one pulled session, keyed on the deterministic cloud entity id. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: CloudSessionEntity)
+
+    /** Drop one user's mirror so a new user's sign-in never lists the previous user's remote runs. */
+    @Query("DELETE FROM cloud_sessions WHERE userId = :userId")
+    suspend fun clearForUser(userId: String)
+
+    /** The global "start fresh" wipe takes the remote mirror with the local record. */
+    @Query("DELETE FROM cloud_sessions")
+    suspend fun clearAll()
+}
+
 @Dao
 interface AnalysisEventDao {
     /**

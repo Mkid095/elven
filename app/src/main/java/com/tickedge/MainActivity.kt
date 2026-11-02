@@ -421,6 +421,11 @@ fun TickEdgeApp(
                         // Activity, which is the one hosting this composition, not the composition scope.
                         activity?.let { viewModel.requestBatteryExemption(it) }
                     },
+                    exactAlarmsAvailable = viewModel.canScheduleExactAlarms(),
+                    onRequestExactAlarms = {
+                        // Same system-screen launch as the battery exemption above.
+                        activity?.let { viewModel.requestExactAlarms(it) }
+                    },
                     onSignOutClick = { viewModel.derivLogout() },
                     onSaveProfileName = viewModel::saveProfileDisplayName,
                     cloudSignedIn = cloudSignedIn,

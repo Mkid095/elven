@@ -105,6 +105,16 @@ object HeadlessTrader {
         ensureProfile(runtime, userId)
         openSession(runtime, userId, strategyId, accountKind, account.id)
 
+        // Join the shared layer the way the button-pressed path does. A scheduled run started from
+        // an alarm has no ViewModel to bring the cloud loops up, so without this an overnight run
+        // would trade blind: a stop pressed on the sibling phone (or the web monitor's channel) would
+        // never reach it, and its live P&L would not stream — only its open/close would land. All
+        // three are start-once and no-op when there is no cloud session, so this is harmless when
+        // the device is trading locally with no cloud sign-in.
+        runtime.startCloudStopWatch()
+        runtime.startSessionProgressMirror()
+        runtime.startCloudSessionPull()
+
         val settings = runtime.db.strategySettingsDao().get(userId, strategyId)
             ?: StrategySettingsEntity(userId = userId, strategyId = strategyId)
         val userRow = runtime.db.userSettingsDao().getSettings(userId).first()

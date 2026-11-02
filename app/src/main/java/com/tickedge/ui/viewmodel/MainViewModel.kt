@@ -30,6 +30,7 @@ import com.tickedge.data.local.SimulationPositionEntity
 import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.local.StrategySettingsEntity
 import com.tickedge.data.local.UserProfileEntity
+import com.tickedge.data.local.asSimulationSessionEntity
 import com.tickedge.data.local.UserSettingsEntity
 import com.tickedge.data.model.AccountType
 import com.tickedge.data.model.AnalysisMetric
@@ -573,6 +574,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startCloudLoops() {
         runtime.startCloudStopWatch()
         runtime.startSessionProgressMirror()
+        // The read half of shared sessions: without it this device would publish its own run but
+        // never show a sibling's, so "see the same session on two phones" would be one-way.
+        runtime.startCloudSessionPull()
     }
 
     /**
@@ -587,6 +591,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _cloudSignedIn.value = false
         _cloudEmail.value = null
         _syncState.value = SyncState.Unavailable("Sign in with your email to sync across devices.")
+        // Drop this user's pulled remote sessions too: with the cloud link gone no sibling run can
+        // be showing here, and leaving the stale mirror rows would keep a dead run on the history.
+        val outgoingUser = userId.value
+        viewModelScope.launch(Dispatchers.IO) { db.cloudSessionDao().clearForUser(outgoingUser) }
     }
 
     /**
@@ -1215,7 +1223,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * never empty once a trade exists, and rendering it as a histogram.
      */
     val sessions: StateFlow<List<SimulationSessionEntity>> = userId
-        .flatMapLatest { id -> db.simulationDao().getSessionsForUser(id) }
+        .flatMapLatest { id ->
+            // This device's own runs, plus the ones pulled from a sibling's. The two never collide
+            // (a remote row's id is offset well clear of local auto ids), and the pull already left
+            // out the sessions this device owns, so this is a plain union — not a re-merge that
+            // could double-list a session this device opened and then re-read from the cloud.
+            db.simulationDao().getSessionsForUser(id)
+                .combine(db.cloudSessionDao().getForUser(id)) { local, remote ->
+                    local + remote.map { it.asSimulationSessionEntity() }
+                }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /**
@@ -1973,6 +1990,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .isIgnoringBatteryOptimizations(app.packageName)
     }
 
+    /**
+     * Whether a scheduled run can fire at the exact picked time on this device.
+     *
+     * When it is not, schedules still arm but only inexact (the OS may defer the fire), and the
+     * settings card shows the row that offers the grant.
+     */
+    fun canScheduleExactAlarms(): Boolean =
+        com.tickedge.domain.TradeScheduler.canScheduleExactAlarms(getApplication())
+
+    /**
+     * Ask the OS to let the app fire exact alarms, so overnight schedules land at the picked time
+     * rather than the nearest allowed maintenance window. On Android 12+ the action is a dedicated
+     * settings screen; below that the permission is on by default, so there is nothing to request.
+     */
+    fun requestExactAlarms(activity: Activity) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return
+        val intent = Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+            setData(Uri.parse("package:${activity.packageName}"))
+        }
+        activity.startActivity(intent)
+    }
+
     /** Re-arm every schedule for the current user. */
     private fun reArmSchedules() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -2334,6 +2373,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             db.simulationDao().clearAllPositions()
             db.simulationDao().clearAllSessions()
             db.analysisEventDao().clearAllEvents()
+            // The remote-session mirror is part of the record too, or a wiped phone would still
+            // list a sibling's sessions it no longer has any of its own to stand next to.
+            db.cloudSessionDao().clearAll()
             // Clear the signed-in user's cloud copy too, or the next pull would re-import the very
             // record just wiped. Only when a cloud session exists — a local-only wipe is still
             // useful when not signed in, and there is nothing in the cloud to clear.

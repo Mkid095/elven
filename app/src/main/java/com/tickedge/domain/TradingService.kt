@@ -105,11 +105,25 @@ class TradingService : Service() {
         serviceScope.launch {
             val result = HeadlessTrader.start(this@TradingService, strategyId, accountKind)
             android.util.Log.i("TradingService", "Scheduled start ($strategyId): $result")
-            // A schedule that cannot trade must say so, not fail quietly. The token expiring is the
-            // one case that outlives the device without a person, so it is the one worth a line
-            // the user can find in the log. (A dedicated notification is a follow-up.)
-            if (result is HeadlessTrader.StartResult.TokenExpired) {
-                android.util.Log.w("TradingService", "Scheduled start skipped: Deriv access token expired and cannot be refreshed")
+            // A schedule that cannot trade must say so, not fail quietly. An overnight run that
+            // never started is the failure nobody is watching for, so it becomes a notification on
+            // the events channel, not just a log line — the device stays the trader, but a person
+            // still has to know the trade did not happen.
+            when (result) {
+                is HeadlessTrader.StartResult.TokenExpired -> {
+                    android.util.Log.w("TradingService", "Scheduled start skipped: Deriv access token expired and cannot be refreshed")
+                    notifier.postEvent(
+                        "Scheduled trade did not start",
+                        "The $accountKind run for \"$strategyId\" is waiting, but the Deriv access token has expired and cannot be refreshed. Sign in again to start it."
+                    )
+                }
+                is HeadlessTrader.StartResult.SignedOut -> {
+                    notifier.postEvent(
+                        "Scheduled trade did not start",
+                        "No trading account is signed in on this device, so the $accountKind run for \"$strategyId\" cannot start. Sign in to arm the schedule."
+                    )
+                }
+                else -> Unit // Trading or AlreadyRunning: nothing to warn about.
             }
         }
     }

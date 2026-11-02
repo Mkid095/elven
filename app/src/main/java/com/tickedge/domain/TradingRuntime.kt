@@ -4,9 +4,11 @@ import android.app.Application
 import com.tickedge.BuildConfig
 import com.tickedge.auth.DerivOAuthClient
 import com.tickedge.data.deriv.DerivClient
+import com.tickedge.data.instant.FidscriptAttrs
 import com.tickedge.data.instant.FidscriptSession
 import com.tickedge.data.instant.InstantDbClient
 import com.tickedge.data.local.AppDatabase
+import com.tickedge.data.local.CloudSessionEntity
 import com.tickedge.data.local.SimulationSessionEntity
 import com.tickedge.data.websocket.DerivWebSocketService
 import kotlinx.coroutines.CoroutineScope
@@ -110,6 +112,8 @@ class TradingRuntime private constructor(
     private var cloudStopWatchStarted = false
     @Volatile
     private var sessionProgressMirrorStarted = false
+    @Volatile
+    private var cloudSessionPullStarted = false
 
     // ---------------------------------------------------------- cloud session mirror
 
@@ -126,7 +130,7 @@ class TradingRuntime private constructor(
         scope.launch(Dispatchers.IO) {
             cloudClient.upsertSession(
                 userId = fidUserId,
-                entityId = InstantDbClient.sessionEntityId(id),
+                entityId = InstantDbClient.sessionEntityId(session),
                 fields = mapOf(
                     "userId" to fidUserId,
                     "sessionId" to id,
@@ -154,7 +158,7 @@ class TradingRuntime private constructor(
         val summary = db.simulationDao().getSessionSummary(session.userId, session.id).first()
         cloudClient.upsertSession(
             userId = fidUserId,
-            entityId = InstantDbClient.sessionEntityId(session.id),
+            entityId = InstantDbClient.sessionEntityId(session),
             fields = mapOf(
                 "userId" to fidUserId,
                 "sessionId" to session.id,
@@ -178,7 +182,7 @@ class TradingRuntime private constructor(
         val summary = db.simulationDao().getSessionSummary(session.userId, session.id).first()
         cloudClient.upsertSession(
             userId = fidUserId,
-            entityId = InstantDbClient.sessionEntityId(session.id),
+            entityId = InstantDbClient.sessionEntityId(session),
             fields = mapOf(
                 "userId" to fidUserId,
                 "sessionId" to session.id,
@@ -216,6 +220,108 @@ class TradingRuntime private constructor(
                 delay(CLOUD_PROGRESS_POLL_MS)
             }
         }
+    }
+
+    /**
+     * Pull this user's other-device sessions into Room, so the History Sessions list shows them.
+     *
+     * The write half of shared sessions (this device publishing its own run) needs a matching read
+     * half, or a sibling sees only "a run went live and finished" — the open/close one-shots — and
+     * never the live P&L between them, and on this device the remote run is absent from the history
+     * entirely. This loop is that read half: every poll it reads the `sessions` namespace and
+     * upserts rows the user does not already own locally, and the `sessions` flow then re-emits and
+     * the UI follows. Same ~5 s period as the progress mirror, so a live remote run ticks on both.
+     *
+     * Started lazily like the other two (guarded, start-once) so a device that is signed in only
+     * pays for the loop while it is actually signed in.
+     */
+    fun startCloudSessionPull() {
+        if (cloudSessionPullStarted) return
+        cloudSessionPullStarted = true
+        scope.launch(Dispatchers.IO) {
+            while (true) {
+                pullCloudSessions()
+                delay(CLOUD_PROGRESS_POLL_MS)
+            }
+        }
+    }
+
+    /** One poll of the `sessions` namespace into [com.tickedge.data.local.CloudSessionEntity] rows. */
+    private suspend fun pullCloudSessions() {
+        if (!cloudClient.isReady()) return
+        val fidUserId = fidscriptSession.userId() ?: return
+        val rows = cloudClient.readNamespace(FidscriptAttrs.NS_SESSIONS).getOrNull() ?: return
+
+        // Leave out the sessions this device already owns locally — the pull's whole job is the
+        // ones that came from a sibling. A session and its own published copy share the same cloud
+        // key, so comparing keys separates "mine" from "theirs". A plain Room-id match is not
+        // enough here: two devices of the same person can both hold a "session 1", so identity is
+        // the key, not the id.
+        val localKeys = db.simulationDao().getSessionsForUser(userId).first()
+            .map { InstantDbClient.sessionEntityId(it) }.toSet()
+        val dao = db.cloudSessionDao()
+        for ((entityId, byAttr) in rows) {
+            if (entityId in localKeys) continue
+            val cloudSessionId = asLong(byAttr["sessionId"])
+            if (cloudSessionId == 0L) continue
+
+            dao.upsert(
+                CloudSessionEntity(
+                    cloudEntityId = entityId,
+                    // Stored under the *local* user id, not the FIDScript one: the `sessions` flow
+                    // that renders this table is scoped to the local id, exactly like the pulled
+                    // trades. fidUserId is only who owns the cloud rows; locally they belong to the
+                    // same person's profile.
+                    userId = userId,
+                    cloudSessionId = cloudSessionId,
+                    accountId = byAttr["accountId"]?.toString().orEmpty(),
+                    isReal = asBool(byAttr["isReal"]),
+                    strategy = byAttr["strategy"]?.toString().orEmpty().ifEmpty { "Differs" },
+                    strategyId = byAttr["strategyId"]?.toString().orEmpty(),
+                    status = byAttr["status"]?.toString().orEmpty().ifEmpty { "ACTIVE" },
+                    startedAt = asLong(byAttr["startedAt"]),
+                    endedAt = asNullableLong(byAttr["endedAt"]),
+                    totalTrades = asInt(byAttr["totalTrades"]),
+                    winCount = asInt(byAttr["winCount"]),
+                    lossCount = asInt(byAttr["lossCount"]),
+                    netProfit = asDouble(byAttr["netProfit"]),
+                    grossProfit = asDouble(byAttr["grossProfit"]),
+                    grossLoss = asDouble(byAttr["grossLoss"]),
+                    totalStaked = asDouble(byAttr["totalStaked"]),
+                    initialSimulatedBalance = asDouble(byAttr["initialSimulatedBalance"]),
+                    currentSimulatedBalance = asDouble(byAttr["currentSimulatedBalance"]),
+                    updatedAt = asLong(byAttr["updatedAt"])
+                )
+            )
+        }
+    }
+
+    // The cloud returns attribute values as their native JSON types, but the decode path can hand a
+    // number back as a String; these keep the read tolerant rather than dropping a value it cannot
+    // cast. `endedAt` is the one that is legitimately absent while a session is still ACTIVE, so it
+    // has its own nullable flavour.
+    private fun asLong(v: Any?): Long = when (v) {
+        is Number -> v.toLong()
+        else -> v?.toString()?.toDoubleOrNull()?.toLong() ?: 0L
+    }
+
+    private fun asNullableLong(v: Any?): Long? = when (v) {
+        null -> null
+        is Number -> v.toLong()
+        else -> v.toString().toDoubleOrNull()?.toLong()
+    }
+
+    private fun asInt(v: Any?): Int = asLong(v).toInt()
+
+    private fun asDouble(v: Any?): Double = when (v) {
+        is Number -> v.toDouble()
+        else -> v?.toString()?.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun asBool(v: Any?): Boolean = when (v) {
+        is Boolean -> v
+        is Number -> v.toLong() != 0L
+        else -> v?.toString()?.toBoolean() ?: false
     }
 
     /**

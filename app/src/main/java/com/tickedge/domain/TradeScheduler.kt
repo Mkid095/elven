@@ -70,23 +70,48 @@ object TradeScheduler {
     }
 
     private fun scheduleStart(context: Context, run: ScheduledRunEntity, at: Long) {
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP,
-            at,
-            servicePendingIntent(context, ACTION_START, run)
-        )
-        Log.i("TradeScheduler", "Armed start: schedule ${run.id} at $at")
+        programAlarm(context, at, servicePendingIntent(context, ACTION_START, run), "start")
     }
 
     private fun scheduleStop(context: Context, run: ScheduledRunEntity, at: Long) {
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.setExactAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP,
-            at,
-            servicePendingIntent(context, ACTION_STOP, run)
-        )
+        programAlarm(context, at, servicePendingIntent(context, ACTION_STOP, run), "stop")
     }
+
+    /**
+     * Program one alarm, preferring exact and falling back to inexact.
+     *
+     * `setExactAndAllowWhileIdle` only works while the app may schedule exact alarms. On most
+     * sideloaded builds the manifest's `USE_EXACT_ALARM` grants that by default, but on a Play
+     * install the store strips it and the user has to allow it — and some OEMs keep it off entirely.
+     * Without the permission the exact call throws and the schedule silently stops firing. Rather
+     * than crash or no-op, fall back to `setAndAllowWhileIdle`: inexact, so the OS may defer the
+     * fire to a maintenance window, but it still wakes the app near the time instead of never. The
+     * settings card surfaces [canScheduleExactAlarms] so the user can grant the precise one.
+     */
+    private fun programAlarm(context: Context, at: Long, pending: PendingIntent, label: String) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        if (canScheduleExactAlarms(context)) {
+            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+            Log.i("TradeScheduler", "Armed $label (exact): $at")
+        } else {
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
+            Log.w("TradeScheduler", "Armed $label inexact (exact alarms unavailable): $at")
+        }
+    }
+
+    /**
+     * Whether this device lets the app fire alarms at the exact picked time.
+     *
+     * Below Android 12 there is no such gate, so it is always available. Exposed so the settings
+     * card can decide whether to offer the user the "request exact alarms" system screen.
+     */
+    fun canScheduleExactAlarms(context: Context): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            am.canScheduleExactAlarms()
+        } else {
+            true
+        }
 
     private fun cancelStart(context: Context, run: ScheduledRunEntity) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager

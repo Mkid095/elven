@@ -1,5 +1,6 @@
 package com.tickedge.data.instant
 
+import com.tickedge.data.local.SimulationSessionEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -538,12 +539,18 @@ class InstantDbClient(
         /**
          * Stable FIDScript entity id for one trading session.
          *
-         * Keyed on the Room session id, so a session this device opens and one pulled from the
-         * cloud resolve to the same row regardless of which device did the writing — which is
-         * exactly the invariant two devices need to see one session, not two.
+         * Keyed on the session's own fields rather than its Room id alone. The Room id is a
+         * per-database auto-increment, so two devices of the same person can both hold a "session
+         * 1" — keying on the id alone would make their two distinct runs collide on one cloud row
+         * and clobber each other. The fields below differ across devices: a session opens at its
+         * own moment and may target a different strategy or account, so two genuinely different
+         * sessions resolve to two rows, while re-publishing the *same* session (open, progress,
+         * close) always hits the one row it started.
          */
-        fun sessionEntityId(sessionId: Long): String =
-            UUID.nameUUIDFromBytes("tickedge:session:$sessionId".toByteArray()).toString()
+        fun sessionEntityId(session: SimulationSessionEntity): String =
+            UUID.nameUUIDFromBytes(
+                "tickedge:session:${session.userId}:${session.startedAt}:${session.strategyId}:${session.accountId}:${session.id}".toByteArray()
+            ).toString()
 
         /**
          * Stable FIDScript entity id for a person's run-control row.
