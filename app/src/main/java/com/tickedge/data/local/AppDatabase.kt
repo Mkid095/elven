@@ -597,28 +597,27 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_16_TO_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // Must match Room's own createSql for ScheduledRunEntity byte-for-byte (defaults,
+                // NOT NULL on the PK, no FK, no index), or the post-migration validation rejects it
+                // and the app crashes on upgrade. See the exported schema 17.json.
                 db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `scheduled_runs` (
-                        `id` INTEGER PRIMARY KEY AUTOINCREMENT,
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                         `userId` TEXT NOT NULL,
                         `strategyId` TEXT NOT NULL,
-                        `label` TEXT NOT NULL DEFAULT '',
-                        `startAt` INTEGER NOT NULL DEFAULT 0,
-                        `stopAt` INTEGER NOT NULL DEFAULT 0,
-                        `recurring` TEXT NOT NULL DEFAULT 'once',
-                        `timeOfDay` TEXT NOT NULL DEFAULT '',
-                        `dayOfWeek` INTEGER NOT NULL DEFAULT 1,
-                        `durationMinutes` INTEGER NOT NULL DEFAULT 60,
-                        `enabled` INTEGER NOT NULL DEFAULT 1,
-                        `accountKind` TEXT NOT NULL DEFAULT 'DEMO',
-                        `createdAt` INTEGER NOT NULL DEFAULT 0,
-                        FOREIGN KEY (`userId`) REFERENCES `profiles`(`id`) ON DELETE CASCADE
+                        `label` TEXT NOT NULL,
+                        `startAt` INTEGER NOT NULL,
+                        `stopAt` INTEGER NOT NULL,
+                        `recurring` TEXT NOT NULL,
+                        `timeOfDay` TEXT NOT NULL,
+                        `dayOfWeek` INTEGER NOT NULL,
+                        `durationMinutes` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL,
+                        `accountKind` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL
                     )
                     """.trimIndent()
-                )
-                db.execSQL(
-                    "CREATE INDEX IF NOT EXISTS `index_scheduled_runs_userId` ON `scheduled_runs` (`userId`)"
                 )
             }
         }
@@ -634,30 +633,33 @@ abstract class AppDatabase : RoomDatabase() {
          */
         private val MIGRATION_17_TO_18 = object : Migration(17, 18) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // Must match Room's own createSql for CloudSessionEntity byte-for-byte (no SQL
+                // defaults, NOT NULL columns, TEXT primary key), or the post-migration validation
+                // rejects it and the app crashes on upgrade. See the exported schema 18.json.
                 db.execSQL(
                     """
                     CREATE TABLE IF NOT EXISTS `cloud_sessions` (
                         `cloudEntityId` TEXT NOT NULL,
                         `userId` TEXT NOT NULL,
-                        `cloudSessionId` INTEGER NOT NULL DEFAULT 0,
-                        `accountId` TEXT NOT NULL DEFAULT '',
-                        `isReal` INTEGER NOT NULL DEFAULT 0,
-                        `strategy` TEXT NOT NULL DEFAULT 'Differs',
-                        `strategyId` TEXT NOT NULL DEFAULT '',
-                        `status` TEXT NOT NULL DEFAULT 'ACTIVE',
-                        `startedAt` INTEGER NOT NULL DEFAULT 0,
+                        `cloudSessionId` INTEGER NOT NULL,
+                        `accountId` TEXT NOT NULL,
+                        `isReal` INTEGER NOT NULL,
+                        `strategy` TEXT NOT NULL,
+                        `strategyId` TEXT NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `startedAt` INTEGER NOT NULL,
                         `endedAt` INTEGER,
-                        `totalTrades` INTEGER NOT NULL DEFAULT 0,
-                        `winCount` INTEGER NOT NULL DEFAULT 0,
-                        `lossCount` INTEGER NOT NULL DEFAULT 0,
-                        `netProfit` REAL NOT NULL DEFAULT 0.0,
-                        `grossProfit` REAL NOT NULL DEFAULT 0.0,
-                        `grossLoss` REAL NOT NULL DEFAULT 0.0,
-                        `totalStaked` REAL NOT NULL DEFAULT 0.0,
-                        `initialSimulatedBalance` REAL NOT NULL DEFAULT 0.0,
-                        `currentSimulatedBalance` REAL NOT NULL DEFAULT 0.0,
-                        `updatedAt` INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (`cloudEntityId`)
+                        `totalTrades` INTEGER NOT NULL,
+                        `winCount` INTEGER NOT NULL,
+                        `lossCount` INTEGER NOT NULL,
+                        `netProfit` REAL NOT NULL,
+                        `grossProfit` REAL NOT NULL,
+                        `grossLoss` REAL NOT NULL,
+                        `totalStaked` REAL NOT NULL,
+                        `initialSimulatedBalance` REAL NOT NULL,
+                        `currentSimulatedBalance` REAL NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`cloudEntityId`)
                     )
                     """.trimIndent()
                 )

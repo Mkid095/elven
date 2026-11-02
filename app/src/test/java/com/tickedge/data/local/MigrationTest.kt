@@ -599,4 +599,48 @@ class MigrationTest {
             }
         }
     }
+
+    /** Count rows in a `sqlite_master` query, asserting the cursor had at least one row. */
+    private fun SupportSQLiteDatabase.countSqliteMaster(where: String): Int {
+        var count = 0
+        query("SELECT COUNT(*) FROM sqlite_master WHERE $where").use { c ->
+            assertTrue(c.moveToFirst())
+            count = c.getInt(0)
+        }
+        return count
+    }
+
+    /** Number of user-defined columns in a table, via PRAGMA. */
+    private fun SupportSQLiteDatabase.columnCount(table: String): Int {
+        var n = 0
+        query("PRAGMA table_info(`$table`)").use { c ->
+            while (c.moveToNext()) n++
+        }
+        return n
+    }
+
+    @Test
+    fun `sixteen to seventeen creates scheduled_runs the way Room's schema declares`() {
+        // Room re-validates the migrated schema against the entity after the migration runs. The
+        // original hand-written DDL added an index and a foreign key the entity does not declare,
+        // so that check threw and the app crash-looped on upgrade. Pin the exact shape Room's
+        // 17.json expects: 13 plain columns, no index, no foreign key.
+        val migration = AppDatabase.ALL_MIGRATIONS.first { it.startVersion == 16 }
+        val db = runMigration(migration)
+
+        assertEquals(13, db.columnCount("scheduled_runs"))
+        assertEquals("no index on scheduled_runs", 0, db.countSqliteMaster("type='index' AND tbl_name='scheduled_runs' AND name NOT LIKE 'sqlite_%'"))
+        assertEquals("no foreign key on scheduled_runs", 0, db.countSqliteMaster("type='foreign_key' AND tbl_name='scheduled_runs'"))
+    }
+
+    @Test
+    fun `seventeen to eighteen creates cloud_sessions the way Room's schema declares`() {
+        // Same guard for the cloud-session mirror table: the DDL must match Room's 18.json, which
+        // has no SQL defaults, a TEXT primary key and exactly one (non-unique) userId index.
+        val migration = AppDatabase.ALL_MIGRATIONS.first { it.startVersion == 17 }
+        val db = runMigration(migration)
+
+        assertEquals(20, db.columnCount("cloud_sessions"))
+        assertEquals(1, db.countSqliteMaster("type='index' AND name='index_cloud_sessions_userId'"))
+    }
 }
