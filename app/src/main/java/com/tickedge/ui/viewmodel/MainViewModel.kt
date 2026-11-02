@@ -1270,28 +1270,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Derived from the positions table rather than accumulated in memory, so it cannot disagree
      * with the trades that justify it and it survives a process death.
      */
-    val sessionSummary: StateFlow<SessionSummary?> = _activeSessionId
-        .flatMapLatest { id ->
-            if (id == null) flowOf(null)
-            else db.simulationDao().getSessionSummary(currentUserId, id)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    // These three are scoped to BOTH the user and the session. Keying them on `userId` too — not
+    // just `_activeSessionId` — matters: a session can be adopted (or the run can be live) while
+    // the user is still the anonymous placeholder, and `currentUserId` read at that instant would
+    // file the query under the wrong user forever, because nothing else resubscribes it. Reacting
+    // to `userId` is what makes the trades appear the moment sign-in lands, matching the user-wide
+    // flows above.
+    val sessionSummary: StateFlow<SessionSummary?> =
+        userId.combine(_activeSessionId) { u, id -> u to id }
+            .flatMapLatest { (u, id) ->
+                if (id == null) flowOf(null)
+                else db.simulationDao().getSessionSummary(u, id)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     /** The most recent confirmed trade in the running session, for the "last trade" readout. */
-    val lastConfirmedTrade: StateFlow<LastTradeRow?> = _activeSessionId
-        .flatMapLatest { id ->
-            if (id == null) flowOf(null)
-            else db.simulationDao().getLastConfirmedTrade(currentUserId, id)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    val lastConfirmedTrade: StateFlow<LastTradeRow?> =
+        userId.combine(_activeSessionId) { u, id -> u to id }
+            .flatMapLatest { (u, id) ->
+                if (id == null) flowOf(null)
+                else db.simulationDao().getLastConfirmedTrade(u, id)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     /** Positions belonging to the running session only, for session-scoped history. */
-    val sessionPositions: StateFlow<List<SimulationPositionEntity>> = _activeSessionId
-        .flatMapLatest { id ->
-            if (id == null) flowOf(emptyList())
-            else db.simulationDao().getPositionsForSession(currentUserId, id)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val sessionPositions: StateFlow<List<SimulationPositionEntity>> =
+        userId.combine(_activeSessionId) { u, id -> u to id }
+            .flatMapLatest { (u, id) ->
+                if (id == null) flowOf(emptyList())
+                else db.simulationDao().getPositionsForSession(u, id)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /**
      * The session the user has opened for detail (P&L graph + its trades), from the Sessions tab.
@@ -1303,13 +1312,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _detailSession = MutableStateFlow<SimulationSessionEntity?>(null)
     val detailSession: StateFlow<SimulationSessionEntity?> = _detailSession.asStateFlow()
 
-    val detailSessionTrades: StateFlow<List<SimulationPositionEntity>> = _detailSession
-        .flatMapLatest { s ->
-            val id = s?.id
-            if (id == null) flowOf(emptyList())
-            else db.simulationDao().getPositionsForSession(currentUserId, id)
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val detailSessionTrades: StateFlow<List<SimulationPositionEntity>> =
+        userId.combine(_detailSession) { u, s -> u to s?.id }
+            .flatMapLatest { (u, id) ->
+                if (id == null) flowOf(emptyList())
+                else db.simulationDao().getPositionsForSession(u, id)
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     /** Open (or clear, with null) the session shown in the detail sheet. */
     fun openSessionDetail(session: SimulationSessionEntity?) {
